@@ -57,39 +57,121 @@ class CoverageData:
         return sorted(tests) if tests else None
 
 
-def run_coverage_baseline(
-    project_root: Path,
+def _is_pytest_command(test_command: list[str]) -> bool:
+    """True if ``test_command`` invokes pytest."""
+    if not test_command:
+        return False
+    if test_command[0] in ("pytest", "py.test"):
+        return True
+    # ``python -m pytest ...``
+    if (
+        len(test_command) >= 3
+        and test_command[0] == "python"
+        and test_command[1] == "-m"
+        and test_command[2] in ("pytest", "py.test")
+    ):
+        return True
+    return False
+
+
+def _has_pytest_cov() -> bool:
+    """Detect whether pytest-cov is importable in the current environment."""
+    try:
+        result = subprocess.run(
+            ["python", "-c", "import pytest_cov"],
+            capture_output=True, timeout=10,
+        )
+        return result.returncode == 0
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return False
+
+
+def _build_pytest_cov_command(
     test_command: list[str],
-    timeout: float,
-    source_dirs: list[str] | None = None,
-) -> CoverageData:
-    """Run the test suite under ``coverage`` with dynamic contexts.
+    source_dirs: list[str] | None,
+    cov_rc: Path,
+) -> list[str]:
+    """Build a ``pytest --cov ... --cov-context=test`` invocation.
 
-    Returns a ``CoverageData`` with both line coverage and per-line test mapping.
+    pytest-cov hooks into pytest's own setup/call/teardown events, which
+    gives correct per-test attribution under async + importlib (unlike
+    coverage.py's ``dynamic_context = test_function`` heuristic).
     """
-    cov_json = Path(tempfile.mktemp(suffix=".json"))
-    cov_data = cov_json.with_suffix(".coverage")
-    cov_rc = cov_json.with_suffix(".coveragerc")
+    # Strip the leading ``python -m pytest`` / ``pytest`` from the user
+    # command; we re-prepend our own form.
+    if test_command[0] == "python" and len(test_command) >= 3 and test_command[1] == "-m":
+        rest = test_command[3:]  # drop python, -m, pytest
+    elif test_command[0] in ("pytest", "py.test"):
+        rest = test_command[1:]
+    else:
+        rest = test_command  # shouldn't happen — guarded by _is_pytest_command
 
-    # Create a temp .coveragerc to enable dynamic contexts
-    # (the --dynamic-context CLI flag was removed in coverage 7.x)
-    rc_content = "[run]\nbranch = true\ndynamic_context = test_function\n"
+    cov_args: list[str] = []
     if source_dirs:
-        rc_content += f"source = {','.join(source_dirs)}\n"
-    cov_rc.write_text(rc_content)
+        for src in source_dirs:
+            cov_args.append(f"--cov={src}")
+    else:
+        cov_args.append("--cov")
+    cov_args += ["--cov-context=test", f"--cov-config={cov_rc}"]
 
-    cov_cmd = [
-        "python", "-m", "coverage", "run",
-        f"--rcfile={cov_rc}",
-    ]
+    return ["python", "-m", "pytest"] + cov_args + rest
 
-    # Append the test command
+
+def _build_coverage_run_command(
+    test_command: list[str],
+    cov_rc: Path,
+) -> list[str]:
+    """Build a ``coverage run --rcfile=... -- <test command>`` invocation.
+
+    Used as a fallback when the test runner isn't pytest, or pytest-cov
+    isn't installed.
+    """
+    cov_cmd = ["python", "-m", "coverage", "run", f"--rcfile={cov_rc}"]
     if len(test_command) >= 3 and test_command[0] == "python" and test_command[1] == "-m":
         cov_cmd += ["-m"] + test_command[2:]
     elif len(test_command) >= 1 and test_command[0] in ("pytest", "py.test"):
         cov_cmd += ["-m"] + test_command
     else:
         cov_cmd += test_command
+    return cov_cmd
+
+
+def run_coverage_baseline(
+    project_root: Path,
+    test_command: list[str],
+    timeout: float,
+    source_dirs: list[str] | None = None,
+) -> CoverageData:
+    """Run the test suite under coverage with per-test contexts.
+
+    For pytest test commands (when ``pytest-cov`` is installed), invokes
+    ``pytest --cov --cov-context=test`` so pytest-cov's pytest-event hooks
+    drive context attribution. This is required for correct per-test
+    mapping under async tests + importlib, where coverage.py's own
+    ``dynamic_context = test_function`` heuristic misattributes lines.
+
+    For non-pytest runners (or when pytest-cov is missing), falls back to
+    ``coverage run`` with ``dynamic_context = test_function``.
+    """
+    cov_json = Path(tempfile.mktemp(suffix=".json"))
+    cov_data = cov_json.with_suffix(".coverage")
+    cov_rc = cov_json.with_suffix(".coveragerc")
+
+    use_pytest_cov = _is_pytest_command(test_command) and _has_pytest_cov()
+
+    # Build .coveragerc — pytest-cov drives contexts via its own flag, so
+    # we only set dynamic_context for the coverage-run fallback path.
+    rc_content = "[run]\nbranch = true\n"
+    if not use_pytest_cov:
+        rc_content += "dynamic_context = test_function\n"
+    if source_dirs:
+        rc_content += f"source = {','.join(source_dirs)}\n"
+    cov_rc.write_text(rc_content)
+
+    if use_pytest_cov:
+        cov_cmd = _build_pytest_cov_command(test_command, source_dirs, cov_rc)
+    else:
+        cov_cmd = _build_coverage_run_command(test_command, cov_rc)
 
     env = {
         **os.environ,
