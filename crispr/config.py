@@ -31,10 +31,11 @@ Example ``pyproject.toml``::
 
 from __future__ import annotations
 
-import fnmatch
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import pathspec
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -45,6 +46,10 @@ from typing import Any
 class OperatorRule:
     """A glob pattern with an operator allow-list or deny-list.
 
+    Patterns use **gitignore syntax** (via ``pathspec``): ``**`` matches
+    zero or more path segments, ``*`` and ``?`` do not cross ``/``,
+    ``!`` negates, a leading ``/`` anchors to the project root.
+
     ``allowed_operators`` and ``excluded_operators`` are **mutually exclusive**
     within a single rule.  ``allowed_operators = []`` disables all mutations
     for matched files.
@@ -53,6 +58,7 @@ class OperatorRule:
     glob: str
     allowed_operators: list[str] | None = None    # whitelist (empty = none)
     excluded_operators: list[str] | None = None   # blacklist
+    _spec: pathspec.PathSpec = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.allowed_operators is not None and self.excluded_operators is not None:
@@ -60,18 +66,11 @@ class OperatorRule:
                 f"Rule {self.glob!r}: allowed_operators and excluded_operators "
                 "are mutually exclusive — use one or the other."
             )
+        self._spec = pathspec.PathSpec.from_lines("gitwildmatch", [self.glob])
 
     def matches(self, filepath: str) -> bool:
         """Check if *filepath* matches this rule's glob pattern."""
-        from pathlib import PurePath
-        p = PurePath(filepath)
-        if p.match(self.glob):
-            return True
-        # Strip leading **/ and retry (handles root-level files)
-        g = self.glob
-        while g.startswith("**/"):
-            g = g[3:]
-        return p.match(g) if g else False
+        return self._spec.match_file(filepath.replace("\\", "/"))
 
     def filter_operators(self, operator_names: list[str]) -> list[str]:
         """Return the operator names allowed by this rule."""
