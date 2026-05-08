@@ -1,0 +1,555 @@
+"""CLI for crispr — typer + tqdm."""
+
+from __future__ import annotations
+
+import shutil
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+import typer
+from tqdm import tqdm
+
+from . import __version__
+from .cache import (
+    MutationCache,
+    discover_test_files,
+    hash_source,
+    hash_tests,
+    mutation_id,
+)
+from .config import (
+    CrisprConfig,
+    get_source_line,
+    is_line_ignored,
+    load_config,
+    merge_cli_over_config,
+    operators_for_file,
+)
+from .coverage_filter import CoverageData, build_targeted_command, run_coverage_baseline
+from .diff import colorize_diff, mutation_diff
+from .engine import (
+    Mutation,
+    MutationResult,
+    apply_mutation,
+    discover_files,
+    generate_mutations,
+    parse_pragma_skips,
+)
+from .operators import ALL_OPERATORS, get_operators
+from .reporter import (
+    Summary,
+    print_summary,
+    write_html_report,
+    write_json_report,
+    write_junit_report,
+)
+from .runner import (
+    RunConfig,
+    _MutationJob,
+    check_baseline,
+    cleanup_workers,
+    run_mutations_parallel,
+    run_mutations_sequential,
+    setup_workers,
+)
+
+app = typer.Typer(
+    name="crispr",
+    help="Fast AST-based mutation testing for Python.",
+    add_completion=False,
+    invoke_without_command=True,
+)
+
+BACKUP_DIR = ".crispr/backup"
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"crispr {__version__}")
+        raise typer.Exit()
+
+
+@app.callback(invoke_without_command=True)
+def _main(
+    ctx: typer.Context,
+    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True),
+) -> None:
+    """Fast AST-based mutation testing for Python."""
+    if ctx.invoked_subcommand is None:
+        # No subcommand → show help
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+
+
+# ══════════════════════════════════════════════════════════════
+# Helpers
+# ══════════════════════════════════════════════════════════════
+
+def _header(cfg: CrisprConfig, root: Path) -> None:
+    sep = "\u2501" * 60
+    typer.echo(f"\n{sep}")
+    typer.echo(f"  crispr {__version__} \u2014 mutation testing for Python")
+    typer.echo(sep)
+    typer.echo(f"  Root:      {root}")
+    typer.echo(f"  Command:   {cfg.command}")
+    typer.echo(f"  Timeout:   {cfg.timeout}s")
+    typer.echo(f"  Cache:     {'off' if cfg.no_cache else 'on'}")
+    typer.echo(f"  Coverage:  {'on' if cfg.coverage else 'off'}")
+    typer.echo(f"  Parallel:  {cfg.workers} worker{'s' if cfg.workers > 1 else ''}")
+    if cfg.rules:
+        typer.echo(f"  Rules:     {len(cfg.rules)} glob rule(s)")
+    if cfg.ignore_patterns:
+        typer.echo(f"  Ignore:    {len(cfg.ignore_patterns)} pattern(s)")
+    typer.echo()
+
+
+def _load_cfg(path: str, config: Optional[str], **cli_overrides) -> tuple[Path, CrisprConfig]:
+    root = Path(path).resolve()
+    config_path = Path(config) if config else None
+    cfg = load_config(config_path=config_path, project_root=root)
+    cfg = merge_cli_over_config(cfg, cli_overrides)
+    cfg.workers = max(1, cfg.workers)
+    return root, cfg
+
+
+# ══════════════════════════════════════════════════════════════
+# run (default command)
+# ══════════════════════════════════════════════════════════════
+
+@app.command()
+def run(
+    path: str = typer.Argument(".", help="Project root"),
+    command: Optional[str] = typer.Option(None, "-c", "--command", help="Test command"),
+    workers: Optional[int] = typer.Option(None, "-j", "--workers", help="Parallel workers"),
+    include: Optional[list[str]] = typer.Option(None, "-i", "--include", help="Include patterns"),
+    exclude: Optional[list[str]] = typer.Option(None, "-e", "--exclude", help="Exclude dirs"),
+    operators: Optional[list[str]] = typer.Option(None, "-o", "--operators", help="Operators"),
+    timeout: Optional[float] = typer.Option(None, "-t", "--timeout", help="Timeout (s)"),
+    config: Optional[str] = typer.Option(None, "--config", help="Config file path"),
+    no_baseline: bool = typer.Option(False, "--no-baseline", help="Skip baseline"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Disable cache"),
+    coverage: bool = typer.Option(False, "--coverage", help="Use coverage.py"),
+    source_dirs: Optional[list[str]] = typer.Option(None, "--source-dirs", help="Coverage source dirs"),
+    json: Optional[str] = typer.Option(None, "--json", help="JSON report path"),
+    html: Optional[str] = typer.Option(None, "--html", help="HTML report path"),
+    junit: Optional[str] = typer.Option(None, "--junit", help="JUnit XML report path"),
+    quiet: bool = typer.Option(False, "-q", "--quiet", help="Summary only"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List mutations only"),
+) -> None:
+    """Run mutation testing."""
+
+    root, cfg = _load_cfg(
+        path, config, command=command, workers=workers, include=include,
+        exclude=exclude, operators=operators, timeout=timeout,
+        no_baseline=no_baseline, no_cache=no_cache, coverage=coverage,
+        source_dirs=source_dirs, json=json, html=html, junit=junit, quiet=quiet, dry_run=dry_run,
+    )
+
+    test_cmd = cfg.command.split()
+    all_op_names = [op.name for op in ALL_OPERATORS]
+    global_operators = get_operators(cfg.operators)
+    run_cfg = RunConfig(project_root=root, test_command=test_cmd, timeout=cfg.timeout, workers=cfg.workers)
+
+    _header(cfg, root)
+
+    # --- Cache ---
+    cache: MutationCache | None = None
+    tests_sha = ""
+    if not cfg.no_cache:
+        cache = MutationCache(root)
+        test_files = discover_test_files(root)
+        tests_sha = hash_tests(test_files) if test_files else ""
+        old = cache.get_tests_sha()
+        if old is not None and old != tests_sha:
+            typer.echo("  Tests changed \u2014 full re-run required\n")
+        cache.set_tests_sha(tests_sha)
+
+    # --- Discover ---
+    files = discover_files(root, include=cfg.include, exclude=cfg.exclude)
+    if not files:
+        typer.echo("  No Python files found.")
+        raise typer.Exit(1)
+    typer.echo(f"  Found {len(files)} source file(s)\n")
+
+    # --- Baseline ---
+    cov_data: CoverageData | None = None
+    if cfg.coverage:
+        typer.echo("  Running baseline with coverage (dynamic contexts)...", nl=False)
+        cov_data = run_coverage_baseline(root, test_cmd, cfg.timeout, source_dirs=cfg.source_dirs)
+        if not cov_data.passed:
+            typer.echo(f" FAILED\n\n{cov_data.output}")
+            raise typer.Exit(1)
+        total_cov = sum(len(v) for v in cov_data.covered_lines.values())
+        ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
+        ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
+        typer.echo(f" OK ({total_cov} lines covered{ctx_note})\n")
+    elif not cfg.no_baseline:
+        typer.echo("  Running baseline tests...", nl=False)
+        passed, output = check_baseline(run_cfg)
+        if not passed:
+            typer.echo(f" FAILED\n\n{output}")
+            raise typer.Exit(1)
+        typer.echo(" OK\n")
+
+    # --- Generate mutations ---
+    FileEntry = tuple[str, str, list[Mutation], str]
+    file_entries: list[FileEntry] = []
+    sources: dict[str, str] = {}  # rel → source (for ignore_patterns)
+
+    for fpath in files:
+        rel = str(fpath.relative_to(root))
+        source = fpath.read_text(encoding="utf-8")
+        sources[rel] = source
+        src_sha = hash_source(fpath) if cache else ""
+        pragma_skips = parse_pragma_skips(source)
+        skip_lines: set[int] = set()
+
+        if cfg.coverage and cov_data:
+            if rel in cov_data.covered_lines:
+                all_lines = set(range(1, source.count("\n") + 2))
+                skip_lines = all_lines - cov_data.covered_lines[rel]
+            else:
+                continue
+
+        if cfg.rules:
+            file_operators = get_operators(operators_for_file(rel, all_op_names, cfg.rules))
+        else:
+            file_operators = global_operators
+
+        mutations = generate_mutations(
+            source, rel, operators=file_operators,
+            skip_lines=skip_lines, pragma_skips=pragma_skips,
+        )
+        if mutations:
+            file_entries.append((rel, source, mutations, src_sha))
+
+    total_mutations = sum(len(e[2]) for e in file_entries)
+    typer.echo(f"  Generated {total_mutations} mutation(s)\n")
+
+    if total_mutations == 0:
+        typer.echo("  Nothing to mutate.")
+        raise typer.Exit(0)
+
+    if cfg.dry_run:
+        for rel, _, mutations, _ in file_entries:
+            for m in mutations:
+                mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+                typer.echo(f"  {mid}  {m}")
+        typer.echo(f"\n  Total: {total_mutations} mutations (dry run)")
+        raise typer.Exit(0)
+
+    # --- Build jobs ---
+    all_jobs: list[tuple[str, str, str, Mutation, int, list[str]]] = []
+    targeted_count = 0
+    for rel, source, mutations, src_sha in file_entries:
+        for idx, m in enumerate(mutations):
+            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+            if cache and cache.is_fresh(mid, src_sha, tests_sha):
+                continue
+            cmd = test_cmd
+            if cov_data and cov_data.has_contexts:
+                tests = cov_data.tests_for_mutation(rel, m.lineno)
+                if tests:
+                    cmd = build_targeted_command(test_cmd, tests)
+                    targeted_count += 1
+            all_jobs.append((rel, source, src_sha, m, idx, cmd))
+
+    # --- Cached results ---
+    all_results: list[MutationResult] = []
+    cached_count = 0
+    for rel, source, mutations, src_sha in file_entries:
+        for m in mutations:
+            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+            if cache and cache.is_fresh(mid, src_sha, tests_sha):
+                cr = cache.get_result(mid)
+                if cr and cr.status:
+                    diff_text = mutation_diff(source, rel, m) if cr.status == "survived" else ""
+                    all_results.append(MutationResult(
+                        mutation=m, status=cr.status,
+                        duration_s=cr.duration_s, output=cr.output, diff=diff_text,
+                    ))
+                    cached_count += 1
+
+    if cached_count and not cfg.quiet:
+        typer.echo(f"  \033[36mCache: {cached_count} results reused\033[0m")
+    if targeted_count and not cfg.quiet:
+        typer.echo(f"  \033[36mTargeted tests: {targeted_count} mutations\033[0m")
+
+    if not all_jobs:
+        typer.echo(f"  All {total_mutations} mutations cached.\n")
+    else:
+        typer.echo(f"\n  Running {len(all_jobs)} mutation(s)...\n")
+
+    # --- Execute with tqdm ---
+    start_time = time.monotonic()
+    new_results: list[MutationResult] = []
+
+    if all_jobs:
+        actual_workers = min(cfg.workers, len(all_jobs))
+        typer.echo(f"  Setting up {actual_workers} worker(s)...", nl=False)
+        worker_dirs = setup_workers(root, actual_workers)
+        typer.echo(" OK\n")
+
+        jobs = [
+            _MutationJob(mutation=m, mutation_index=idx, filepath=rel,
+                         source=source, test_command=cmd)
+            for rel, source, _, m, idx, cmd in all_jobs
+        ]
+
+        bar = tqdm(
+            total=len(jobs), desc="  Mutating",
+            unit="mut", leave=True, disable=cfg.quiet,
+            bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+        )
+
+        def _on_progress(cur: int, tot: int, r: MutationResult) -> None:
+            color = {"killed": "green", "survived": "red", "timeout": "yellow"}.get(r.status, "")
+            bar.set_postfix_str(f"{r.status}", refresh=False)
+            bar.update(1)
+
+        if cfg.workers > 1:
+            new_results = run_mutations_parallel(run_cfg, jobs, worker_dirs, _on_progress)
+        else:
+            by_file: dict[str, list[tuple[Mutation, int, list[str]]]] = {}
+            for rel, source, _, m, idx, cmd in all_jobs:
+                by_file.setdefault(rel, []).append((m, idx, cmd))
+
+            for rel_key, entries in by_file.items():
+                src = next(s for r, s, _, _, _, _ in all_jobs if r == rel_key)
+                new_results.extend(run_mutations_sequential(
+                    run_cfg, rel_key, src,
+                    [e[0] for e in entries], [e[1] for e in entries], [e[2] for e in entries],
+                    progress_callback=_on_progress, worker_dir=worker_dirs[0],
+                ))
+
+        bar.close()
+        typer.echo(f"  Cleaning up workers...", nl=False)
+        cleanup_workers(root)
+        typer.echo(" OK")
+
+    # --- Store in cache ---
+    if cache and new_results:
+        for (rel, _, src_sha, m, _, _), r in zip(all_jobs, new_results):
+            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+            cache.store_result(
+                mid=mid, filepath=rel, lineno=m.lineno, col_offset=m.col_offset,
+                operator=m.operator, description=m.description,
+                status=r.status, duration_s=r.duration_s, output=r.output,
+                source_sha=src_sha, tests_sha=tests_sha,
+            )
+        for rel, _, src_sha, _, _, _ in {j[0]: j for j in all_jobs}.values():
+            cache.set_source_sha(rel, src_sha)
+
+    all_results.extend(new_results)
+    elapsed = time.monotonic() - start_time
+
+    # --- Apply ignore_patterns to survivors ---
+    if cfg.ignore_patterns:
+        ignored_count = 0
+        for r in all_results:
+            if r.status == "survived":
+                line = get_source_line(sources.get(r.mutation.file, ""), r.mutation.lineno)
+                if is_line_ignored(line, cfg.ignore_patterns):
+                    # Replace status (MutationResult is frozen, create new)
+                    idx = all_results.index(r)
+                    all_results[idx] = MutationResult(
+                        mutation=r.mutation, status="ignored",
+                        duration_s=r.duration_s, output=r.output, diff=r.diff,
+                    )
+                    ignored_count += 1
+        if ignored_count:
+            typer.echo(f"\n  \033[2mIgnored: {ignored_count} survivor(s) matched ignore_patterns\033[0m")
+
+    # --- Summary ---
+    summary = Summary.from_results(all_results)
+    summary.duration_s = elapsed
+    print_summary(summary)
+
+    if cfg.json_report:
+        write_json_report(summary, Path(cfg.json_report))
+    if cfg.html_report:
+        write_html_report(summary, Path(cfg.html_report))
+    if cfg.junit_report:
+        write_junit_report(summary, Path(cfg.junit_report))
+    if cache:
+        cache.close()
+
+    raise typer.Exit(0 if summary.survived == 0 else 1)
+
+
+# ══════════════════════════════════════════════════════════════
+# show
+# ══════════════════════════════════════════════════════════════
+
+@app.command()
+def show(
+    mutation_id_arg: str = typer.Argument(..., metavar="ID", help="Mutation ID (12-char hex)"),
+    path: str = typer.Argument(".", help="Project root"),
+) -> None:
+    """Show diff for a mutation by ID."""
+    root = Path(path).resolve()
+    cache = MutationCache(root)
+    result = cache.get_result(mutation_id_arg)
+    cache.close()
+
+    if result is None:
+        typer.echo(f"  No mutation found with ID {mutation_id_arg}")
+        raise typer.Exit(1)
+
+    typer.echo(f"\n  Mutation  {result.mutation_id}")
+    typer.echo(f"  File:     {result.filepath}:{result.lineno}")
+    typer.echo(f"  Operator: {result.operator}")
+    typer.echo(f"  Desc:     {result.description}")
+    typer.echo(f"  Status:   {result.status}\n")
+
+    fpath = root / result.filepath
+    if not fpath.exists():
+        typer.echo(f"  (file not found)")
+        return
+
+    source = fpath.read_text(encoding="utf-8")
+    mutations = generate_mutations(source, result.filepath)
+    for m in mutations:
+        mid = mutation_id(result.filepath, m.operator, m.lineno, m.col_offset, m.description)
+        if mid == result.mutation_id:
+            diff_text = mutation_diff(source, result.filepath, m)
+            typer.echo(colorize_diff(diff_text) if diff_text else "  (no diff)")
+            return
+
+    typer.echo("  (source changed \u2014 cannot regenerate diff)")
+
+
+# ══════════════════════════════════════════════════════════════
+# apply / revert
+# ══════════════════════════════════════════════════════════════
+
+@app.command()
+def apply(
+    mutation_id_arg: str = typer.Argument(..., metavar="ID", help="Mutation ID to apply"),
+    path: str = typer.Argument(".", help="Project root"),
+    revert: bool = typer.Option(False, "--revert", help="Revert applied mutation from backup"),
+) -> None:
+    """Apply a mutation to disk for debugging, or revert it."""
+    root = Path(path).resolve()
+    backup_base = root / BACKUP_DIR
+
+    if revert:
+        if not backup_base.exists():
+            typer.echo("  No backup found — nothing to revert.")
+            raise typer.Exit(1)
+        restored = 0
+        for backup_file in backup_base.rglob("*"):
+            if backup_file.is_file():
+                rel = backup_file.relative_to(backup_base)
+                target = root / rel
+                shutil.copy2(backup_file, target)
+                typer.echo(f"  Restored {rel}")
+                restored += 1
+        shutil.rmtree(backup_base)
+        typer.echo(f"\n  Reverted {restored} file(s). Backup cleared.")
+        return
+
+    # --- Apply mutation ---
+    cache = MutationCache(root)
+    result = cache.get_result(mutation_id_arg)
+    cache.close()
+
+    if result is None:
+        typer.echo(f"  No mutation found with ID {mutation_id_arg}")
+        raise typer.Exit(1)
+
+    fpath = root / result.filepath
+    if not fpath.exists():
+        typer.echo(f"  File not found: {result.filepath}")
+        raise typer.Exit(1)
+
+    source = fpath.read_text(encoding="utf-8")
+
+    # Find and apply mutation
+    mutations = generate_mutations(source, result.filepath)
+    target_m = None
+    for m in mutations:
+        mid = mutation_id(result.filepath, m.operator, m.lineno, m.col_offset, m.description)
+        if mid == mutation_id_arg:
+            target_m = m
+            break
+
+    if target_m is None:
+        typer.echo("  Source changed — mutation no longer exists.")
+        raise typer.Exit(1)
+
+    mutated = apply_mutation(source, result.filepath, target_m)
+
+    # Save backup
+    backup_path = backup_base / result.filepath
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    if not backup_path.exists():
+        shutil.copy2(fpath, backup_path)
+
+    # Write mutated file
+    fpath.write_text(mutated, encoding="utf-8")
+
+    typer.echo(f"\n  Applied mutation {mutation_id_arg}")
+    typer.echo(f"  File:   {result.filepath}:{result.lineno}")
+    typer.echo(f"  Desc:   [{result.operator}] {result.description}")
+    typer.echo(f"  Backup: {backup_path}")
+    typer.echo(f"\n  Run \033[1mcrispr apply {mutation_id_arg} --revert\033[0m to restore.")
+
+
+# ══════════════════════════════════════════════════════════════
+# results
+# ══════════════════════════════════════════════════════════════
+
+@app.command()
+def results(
+    path: str = typer.Argument(".", help="Project root"),
+    survivors: bool = typer.Option(False, "--survivors", help="Only survivors"),
+    file: Optional[str] = typer.Option(None, "--file", help="Filter by file"),
+) -> None:
+    """Show cached mutation results."""
+    root = Path(path).resolve()
+    cache = MutationCache(root)
+    if survivors:
+        items = cache.survivors()
+        label = "Surviving mutations"
+    elif file:
+        items = cache.all_results(filepath=file)
+        label = f"Mutations for {file}"
+    else:
+        items = cache.all_results()
+        label = "All cached mutations"
+    cache.close()
+
+    if not items:
+        typer.echo("  No cached results.")
+        return
+
+    _SC = {"killed": "\033[32m", "survived": "\033[31m", "timeout": "\033[33m", "error": "\033[35m", "ignored": "\033[2m"}
+    R = "\033[0m"
+    typer.echo(f"\n  {label} ({len(items)}):\n")
+    for r in items:
+        c = _SC.get(r.status or "", "")
+        typer.echo(f"  {r.mutation_id}  {c}{(r.status or 'pending'):>8}{R}  {r.filepath}:{r.lineno:<4}  [{r.operator}] {r.description}")
+    typer.echo()
+
+
+# ══════════════════════════════════════════════════════════════
+# clear
+# ══════════════════════════════════════════════════════════════
+
+@app.command()
+def clear(
+    path: str = typer.Argument(".", help="Project root"),
+) -> None:
+    """Clear mutation cache and worker directories."""
+    root = Path(path).resolve()
+    cache = MutationCache(root)
+    cache.clear()
+    cache.close()
+    cleanup_workers(root)
+    backup = root / BACKUP_DIR
+    if backup.exists():
+        shutil.rmtree(backup)
+    typer.echo("  Cache, workers, and backups cleared.")

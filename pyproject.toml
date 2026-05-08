@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crispr"
+version = "0.1.0"
+description = "Fast AST-based mutation testing for Python"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "crispr contributors" }]
+dependencies = [
+    "typer>=0.12",
+    "tqdm>=4.60",
+]
+
+[project.scripts]
+crispr = "crispr.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["crispr*"]
