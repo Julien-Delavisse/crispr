@@ -370,8 +370,20 @@ def run(
             actual_lines = sum(len({m.lineno for m in muts}) for _, _, muts, *_ in file_entries)
             actual_files = len(file_entries)
             total_files = len(files)
-            covered_lines = sum(len(v) for v in cov_data.covered_lines.values()) if cov_data else None
-            covered_files = len(cov_data.covered_lines) if cov_data else None
+            # Restrict baseline counts to files that are actually in scope
+            # (matched by --include/--exclude). cov_data.covered_lines holds
+            # everything coverage observed — tests, vendored deps, files
+            # outside the source scope — which would otherwise produce numbers
+            # larger than ``total_files`` and break the hierarchy reported below.
+            files_in_scope = {str(p.relative_to(root)) for p in files}
+            covered_lines = (
+                sum(len(v) for f, v in cov_data.covered_lines.items() if f in files_in_scope)
+                if cov_data else None
+            )
+            covered_files = (
+                sum(1 for f in cov_data.covered_lines if f in files_in_scope)
+                if cov_data else None
+            )
             potential_lines = actual_lines
             potential_files = actual_files
             if cfg.rules:
