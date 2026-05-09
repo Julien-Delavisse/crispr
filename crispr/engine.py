@@ -85,6 +85,9 @@ def discover_files(
     for py in sorted(root.rglob("*.py")):
         if any(part in exclude_dirs for part in py.parts):
             continue
+        rel_dirs = py.relative_to(root).parts[:-1]
+        if any(p.startswith(".") for p in rel_dirs):
+            continue
         if _is_test_file(py):
             continue
         if include:

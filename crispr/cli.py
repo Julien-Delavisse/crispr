@@ -150,264 +150,276 @@ def run(
         quiet=quiet, debug=debug, dry_run=dry_run,
     )
 
-    test_cmd = cfg.command.split()
-    all_op_names = [op.name for op in ALL_OPERATORS]
-    global_operators = get_operators(cfg.operators)
-    run_cfg = RunConfig(project_root=root, test_command=test_cmd, timeout=cfg.timeout, workers=cfg.workers)
+    try:
+        test_cmd = cfg.command.split()
+        all_op_names = [op.name for op in ALL_OPERATORS]
+        global_operators = get_operators(cfg.operators)
+        run_cfg = RunConfig(project_root=root, test_command=test_cmd, timeout=cfg.timeout, workers=cfg.workers)
 
-    _header(cfg, root)
+        _header(cfg, root)
 
-    # --- Cache ---
-    cache: MutationCache | None = None
-    tests_sha = ""
-    if not cfg.no_cache:
-        cache = MutationCache(root)
-        test_files = discover_test_files(root)
-        tests_sha = hash_tests(test_files) if test_files else ""
-        old = cache.get_tests_sha()
-        if old is not None and old != tests_sha:
-            typer.echo("  Tests changed \u2014 full re-run required\n")
-        cache.set_tests_sha(tests_sha)
+        # --- Cache ---
+        cache: MutationCache | None = None
+        tests_sha = ""
+        if not cfg.no_cache:
+            cache = MutationCache(root)
+            test_files = discover_test_files(root)
+            tests_sha = hash_tests(test_files) if test_files else ""
+            old = cache.get_tests_sha()
+            if old is not None and old != tests_sha:
+                typer.echo("  Tests changed \u2014 full re-run required\n")
+            cache.set_tests_sha(tests_sha)
 
-    # --- Discover ---
-    files = discover_files(root, include=cfg.include, exclude=cfg.exclude)
-    if not files:
-        typer.echo("  No Python files found.")
-        raise typer.Exit(1)
-    typer.echo(f"  Found {len(files)} source file(s)\n")
-
-    # --- Baseline ---
-    cov_data: CoverageData | None = None
-    if cfg.coverage:
-        cov_key = ""
-        if cache:
-            kh = hashlib.sha256()
-            kh.update(tests_sha.encode())
-            kh.update(hash_tests(files).encode())
-            kh.update(" ".join(test_cmd).encode())
-            kh.update(",".join(sorted(cfg.source_dirs or [])).encode())
-            cov_key = kh.hexdigest()
-            cached = cache.get_coverage_payload(cov_key)
-            if cached is not None:
-                try:
-                    cov_data = CoverageData.from_json(cached)
-                except (KeyError, ValueError):
-                    cov_data = None
-        if cov_data is not None:
-            total_cov = sum(len(v) for v in cov_data.covered_lines.values())
-            ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
-            ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
-            typer.echo(f"  Reusing cached coverage baseline ({total_cov} lines covered{ctx_note})\n")
-        else:
-            typer.echo("  Running baseline with coverage (dynamic contexts)...", nl=False)
-            cov_data = run_coverage_baseline(root, test_cmd, cfg.timeout, source_dirs=cfg.source_dirs)
-            if not cov_data.passed:
-                typer.echo(f" FAILED\n\n{cov_data.output}")
-                raise typer.Exit(1)
-            total_cov = sum(len(v) for v in cov_data.covered_lines.values())
-            ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
-            ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
-            typer.echo(f" OK ({total_cov} lines covered{ctx_note})\n")
-            if cache and cov_key:
-                cache.set_coverage_payload(cov_key, cov_data.to_json())
-    elif not cfg.no_baseline:
-        typer.echo("  Running baseline tests...", nl=False)
-        passed, output = check_baseline(run_cfg)
-        if not passed:
-            typer.echo(f" FAILED\n\n{output}")
+        # --- Discover ---
+        files = discover_files(root, include=cfg.include, exclude=cfg.exclude)
+        if not files:
+            typer.echo("  No Python files found.")
             raise typer.Exit(1)
-        typer.echo(" OK\n")
+        typer.echo(f"  Found {len(files)} source file(s)\n")
 
-    # --- Generate mutations ---
-    FileEntry = tuple[str, str, list[Mutation], str]
-    file_entries: list[FileEntry] = []
-    sources: dict[str, str] = {}  # rel → source (for ignore_patterns)
-
-    for fpath in files:
-        rel = str(fpath.relative_to(root))
-        source = fpath.read_text(encoding="utf-8")
-        sources[rel] = source
-        src_sha = hash_source(fpath) if cache else ""
-        pragma_skips = parse_pragma_skips(source)
-        skip_lines: set[int] = set()
-
-        if cfg.coverage and cov_data:
-            if rel in cov_data.covered_lines:
-                all_lines = set(range(1, source.count("\n") + 2))
-                skip_lines = all_lines - cov_data.covered_lines[rel]
+        # --- Baseline ---
+        cov_data: CoverageData | None = None
+        if cfg.coverage:
+            cov_key = ""
+            if cache:
+                kh = hashlib.sha256()
+                kh.update(tests_sha.encode())
+                kh.update(hash_tests(files).encode())
+                kh.update(" ".join(test_cmd).encode())
+                kh.update(",".join(sorted(cfg.source_dirs or [])).encode())
+                cov_key = kh.hexdigest()
+                cached = cache.get_coverage_payload(cov_key)
+                if cached is not None:
+                    try:
+                        cov_data = CoverageData.from_json(cached)
+                    except (KeyError, ValueError):
+                        cov_data = None
+            if cov_data is not None:
+                total_cov = sum(len(v) for v in cov_data.covered_lines.values())
+                ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
+                ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
+                typer.echo(f"  Reusing cached coverage baseline ({total_cov} lines covered{ctx_note})\n")
             else:
-                continue
+                typer.echo("  Running baseline with coverage (dynamic contexts)...", nl=False)
+                cov_data = run_coverage_baseline(root, test_cmd, cfg.timeout, source_dirs=cfg.source_dirs)
+                if not cov_data.passed:
+                    typer.echo(f" FAILED\n\n{cov_data.output}")
+                    raise typer.Exit(1)
+                total_cov = sum(len(v) for v in cov_data.covered_lines.values())
+                ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
+                ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
+                typer.echo(f" OK ({total_cov} lines covered{ctx_note})\n")
+                if cache and cov_key:
+                    cache.set_coverage_payload(cov_key, cov_data.to_json())
+        elif not cfg.no_baseline:
+            typer.echo("  Running baseline tests...", nl=False)
+            passed, output = check_baseline(run_cfg)
+            if not passed:
+                typer.echo(f" FAILED\n\n{output}")
+                raise typer.Exit(1)
+            typer.echo(" OK\n")
 
-        if cfg.rules:
-            file_operators = get_operators(operators_for_file(rel, all_op_names, cfg.rules))
-        else:
-            file_operators = global_operators
+        # --- Generate mutations ---
+        FileEntry = tuple[str, str, list[Mutation], str]
+        file_entries: list[FileEntry] = []
+        sources: dict[str, str] = {}  # rel → source (for ignore_patterns)
 
-        mutations = generate_mutations(
-            source, rel, operators=file_operators,
-            skip_lines=skip_lines, pragma_skips=pragma_skips,
-        )
-        if mutations:
-            file_entries.append((rel, source, mutations, src_sha))
+        for fpath in files:
+            rel = str(fpath.relative_to(root))
+            source = fpath.read_text(encoding="utf-8")
+            sources[rel] = source
+            src_sha = hash_source(fpath) if cache else ""
+            pragma_skips = parse_pragma_skips(source)
+            skip_lines: set[int] = set()
 
-    total_mutations = sum(len(e[2]) for e in file_entries)
-    typer.echo(f"  Generated {total_mutations} mutation(s)\n")
+            if cfg.coverage and cov_data:
+                if rel in cov_data.covered_lines:
+                    all_lines = set(range(1, source.count("\n") + 2))
+                    skip_lines = all_lines - cov_data.covered_lines[rel]
+                else:
+                    continue
 
-    if cfg.debug:
-        for rel, _, mutations, _ in file_entries:
-            tags = "/".join(f"{m.operator}@{m.lineno}" for m in mutations)
-            typer.echo(f"  {rel} : {tags}")
-        typer.echo()
+            if cfg.rules:
+                file_operators = get_operators(operators_for_file(rel, all_op_names, cfg.rules))
+            else:
+                file_operators = global_operators
 
-    if total_mutations == 0:
-        typer.echo("  Nothing to mutate.")
-        raise typer.Exit(0)
+            mutations = generate_mutations(
+                source, rel, operators=file_operators,
+                skip_lines=skip_lines, pragma_skips=pragma_skips,
+            )
+            if mutations:
+                file_entries.append((rel, source, mutations, src_sha))
 
-    if cfg.dry_run:
-        for rel, _, mutations, _ in file_entries:
+        total_mutations = sum(len(e[2]) for e in file_entries)
+        typer.echo(f"  Generated {total_mutations} mutation(s)\n")
+
+        if cfg.debug:
+            for rel, _, mutations, _ in file_entries:
+                tags = "/".join(f"{m.operator}@{m.lineno}" for m in mutations)
+                typer.echo(f"  {rel} : {tags}")
+            typer.echo()
+
+        if total_mutations == 0:
+            typer.echo("  Nothing to mutate.")
+            raise typer.Exit(0)
+
+        if cfg.dry_run:
+            for rel, _, mutations, _ in file_entries:
+                for m in mutations:
+                    mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+                    typer.echo(f"  {mid}  {m}")
+            typer.echo(f"\n  Total: {total_mutations} mutations (dry run)")
+            raise typer.Exit(0)
+
+        # --- Build jobs ---
+        all_jobs: list[tuple[str, str, str, Mutation, int, list[str]]] = []
+        targeted_count = 0
+        for rel, source, mutations, src_sha in file_entries:
+            for idx, m in enumerate(mutations):
+                mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+                if cache and cache.is_fresh(mid, src_sha, tests_sha):
+                    continue
+                cmd = test_cmd
+                if cov_data and cov_data.has_contexts:
+                    tests = cov_data.tests_for_mutation(rel, m.lineno)
+                    if tests:
+                        cmd = build_targeted_command(test_cmd, tests)
+                        targeted_count += 1
+                all_jobs.append((rel, source, src_sha, m, idx, cmd))
+
+        # --- Cached results ---
+        all_results: list[MutationResult] = []
+        cached_count = 0
+        for rel, source, mutations, src_sha in file_entries:
             for m in mutations:
                 mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
-                typer.echo(f"  {mid}  {m}")
-        typer.echo(f"\n  Total: {total_mutations} mutations (dry run)")
-        raise typer.Exit(0)
+                if cache and cache.is_fresh(mid, src_sha, tests_sha):
+                    cr = cache.get_result(mid)
+                    if cr and cr.status:
+                        diff_text = mutation_diff(source, rel, m) if cr.status == "survived" else ""
+                        all_results.append(MutationResult(
+                            mutation=m, status=cr.status,
+                            duration_s=cr.duration_s, output=cr.output, diff=diff_text,
+                        ))
+                        cached_count += 1
 
-    # --- Build jobs ---
-    all_jobs: list[tuple[str, str, str, Mutation, int, list[str]]] = []
-    targeted_count = 0
-    for rel, source, mutations, src_sha in file_entries:
-        for idx, m in enumerate(mutations):
-            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
-            if cache and cache.is_fresh(mid, src_sha, tests_sha):
-                continue
-            cmd = test_cmd
-            if cov_data and cov_data.has_contexts:
-                tests = cov_data.tests_for_mutation(rel, m.lineno)
-                if tests:
-                    cmd = build_targeted_command(test_cmd, tests)
-                    targeted_count += 1
-            all_jobs.append((rel, source, src_sha, m, idx, cmd))
+        if cached_count and not cfg.quiet:
+            typer.echo(f"  \033[36mCache: {cached_count} results reused\033[0m")
+        if targeted_count and not cfg.quiet:
+            typer.echo(f"  \033[36mTargeted tests: {targeted_count} mutations\033[0m")
 
-    # --- Cached results ---
-    all_results: list[MutationResult] = []
-    cached_count = 0
-    for rel, source, mutations, src_sha in file_entries:
-        for m in mutations:
-            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
-            if cache and cache.is_fresh(mid, src_sha, tests_sha):
-                cr = cache.get_result(mid)
-                if cr and cr.status:
-                    diff_text = mutation_diff(source, rel, m) if cr.status == "survived" else ""
-                    all_results.append(MutationResult(
-                        mutation=m, status=cr.status,
-                        duration_s=cr.duration_s, output=cr.output, diff=diff_text,
-                    ))
-                    cached_count += 1
-
-    if cached_count and not cfg.quiet:
-        typer.echo(f"  \033[36mCache: {cached_count} results reused\033[0m")
-    if targeted_count and not cfg.quiet:
-        typer.echo(f"  \033[36mTargeted tests: {targeted_count} mutations\033[0m")
-
-    if not all_jobs:
-        typer.echo(f"  All {total_mutations} mutations cached.\n")
-    else:
-        typer.echo(f"\n  Running {len(all_jobs)} mutation(s)...\n")
-
-    # --- Execute with tqdm ---
-    start_time = time.monotonic()
-    new_results: list[MutationResult] = []
-
-    if all_jobs:
-        actual_workers = min(cfg.workers, len(all_jobs))
-        typer.echo(f"  Setting up {actual_workers} worker(s)...", nl=False)
-        worker_dirs = setup_workers(root, actual_workers)
-        typer.echo(" OK\n")
-
-        jobs = [
-            _MutationJob(mutation=m, mutation_index=idx, filepath=rel,
-                         source=source, test_command=cmd)
-            for rel, source, _, m, idx, cmd in all_jobs
-        ]
-
-        bar = tqdm(
-            total=len(jobs), desc="  Mutating",
-            unit="mut", leave=True, disable=cfg.quiet,
-            bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
-        )
-
-        def _on_progress(cur: int, tot: int, r: MutationResult) -> None:
-            color = {"killed": "green", "survived": "red", "timeout": "yellow"}.get(r.status, "")
-            bar.set_postfix_str(f"{r.status}", refresh=False)
-            bar.update(1)
-
-        if cfg.workers > 1:
-            new_results = run_mutations_parallel(run_cfg, jobs, worker_dirs, _on_progress)
+        if not all_jobs:
+            typer.echo(f"  All {total_mutations} mutations cached.\n")
         else:
-            by_file: dict[str, list[tuple[Mutation, int, list[str]]]] = {}
-            for rel, source, _, m, idx, cmd in all_jobs:
-                by_file.setdefault(rel, []).append((m, idx, cmd))
+            typer.echo(f"\n  Running {len(all_jobs)} mutation(s)...\n")
 
-            for rel_key, entries in by_file.items():
-                src = next(s for r, s, _, _, _, _ in all_jobs if r == rel_key)
-                new_results.extend(run_mutations_sequential(
-                    run_cfg, rel_key, src,
-                    [e[0] for e in entries], [e[1] for e in entries], [e[2] for e in entries],
-                    progress_callback=_on_progress, worker_dir=worker_dirs[0],
-                ))
+        # --- Execute with tqdm ---
+        start_time = time.monotonic()
+        new_results: list[MutationResult] = []
 
-        bar.close()
-        typer.echo(f"  Cleaning up workers...", nl=False)
-        cleanup_workers(root)
-        typer.echo(" OK")
+        if all_jobs:
+            actual_workers = min(cfg.workers, len(all_jobs))
+            typer.echo(f"  Setting up {actual_workers} worker(s)...", nl=False)
+            worker_dirs = setup_workers(root, actual_workers)
+            typer.echo(" OK\n")
 
-    # --- Store in cache ---
-    if cache and new_results:
-        for (rel, _, src_sha, m, _, _), r in zip(all_jobs, new_results):
-            mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
-            cache.store_result(
-                mid=mid, filepath=rel, lineno=m.lineno, col_offset=m.col_offset,
-                operator=m.operator, description=m.description,
-                status=r.status, duration_s=r.duration_s, output=r.output,
-                source_sha=src_sha, tests_sha=tests_sha,
+            jobs = [
+                _MutationJob(mutation=m, mutation_index=idx, filepath=rel,
+                             source=source, test_command=cmd)
+                for rel, source, _, m, idx, cmd in all_jobs
+            ]
+
+            bar = tqdm(
+                total=len(jobs), desc="  Mutating",
+                unit="mut", leave=True, disable=cfg.quiet,
+                bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
             )
-        for rel, _, src_sha, _, _, _ in {j[0]: j for j in all_jobs}.values():
-            cache.set_source_sha(rel, src_sha)
 
-    all_results.extend(new_results)
-    elapsed = time.monotonic() - start_time
+            counts = {"killed": 0, "survived": 0, "timeout": 0, "error": 0}
+            _G, _R, _Y, _M, _X = "\033[32m", "\033[31m", "\033[33m", "\033[35m", "\033[0m"
 
-    # --- Apply ignore_patterns to survivors ---
-    if cfg.ignore_patterns:
-        ignored_count = 0
-        for r in all_results:
-            if r.status == "survived":
-                line = get_source_line(sources.get(r.mutation.file, ""), r.mutation.lineno)
-                if is_line_ignored(line, cfg.ignore_patterns):
-                    # Replace status (MutationResult is frozen, create new)
-                    idx = all_results.index(r)
-                    all_results[idx] = MutationResult(
-                        mutation=r.mutation, status="ignored",
-                        duration_s=r.duration_s, output=r.output, diff=r.diff,
-                    )
-                    ignored_count += 1
-        if ignored_count:
-            typer.echo(f"\n  \033[2mIgnored: {ignored_count} survivor(s) matched ignore_patterns\033[0m")
+            def _on_progress(cur: int, tot: int, r: MutationResult) -> None:
+                counts[r.status] = counts.get(r.status, 0) + 1
+                bar.set_postfix_str(
+                    f"{_G}killed={counts['killed']}{_X} "
+                    f"{_R}survived={counts['survived']}{_X} "
+                    f"{_Y}timeout={counts['timeout']}{_X} "
+                    f"{_M}error={counts['error']}{_X}",
+                    refresh=False,
+                )
+                bar.update(1)
 
-    # --- Summary ---
-    summary = Summary.from_results(all_results)
-    summary.duration_s = elapsed
-    print_summary(summary)
+            if cfg.workers > 1:
+                new_results = run_mutations_parallel(run_cfg, jobs, worker_dirs, _on_progress)
+            else:
+                by_file: dict[str, list[tuple[Mutation, int, list[str]]]] = {}
+                for rel, source, _, m, idx, cmd in all_jobs:
+                    by_file.setdefault(rel, []).append((m, idx, cmd))
 
-    if cfg.json_report:
-        write_json_report(summary, Path(cfg.json_report))
-    if cfg.html_report:
-        write_html_report(summary, Path(cfg.html_report))
-    if cfg.junit_report:
-        write_junit_report(summary, Path(cfg.junit_report))
-    if cache:
-        cache.close()
+                for rel_key, entries in by_file.items():
+                    src = next(s for r, s, _, _, _, _ in all_jobs if r == rel_key)
+                    new_results.extend(run_mutations_sequential(
+                        run_cfg, rel_key, src,
+                        [e[0] for e in entries], [e[1] for e in entries], [e[2] for e in entries],
+                        progress_callback=_on_progress, worker_dir=worker_dirs[0],
+                    ))
 
-    raise typer.Exit(0 if summary.survived == 0 else 1)
+            bar.close()
+            typer.echo(f"  Cleaning up workers...", nl=False)
+            cleanup_workers(root)
+            typer.echo(" OK")
+
+        # --- Store in cache ---
+        if cache and new_results:
+            for (rel, _, src_sha, m, _, _), r in zip(all_jobs, new_results):
+                mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
+                cache.store_result(
+                    mid=mid, filepath=rel, lineno=m.lineno, col_offset=m.col_offset,
+                    operator=m.operator, description=m.description,
+                    status=r.status, duration_s=r.duration_s, output=r.output,
+                    source_sha=src_sha, tests_sha=tests_sha,
+                )
+            for rel, _, src_sha, _, _, _ in {j[0]: j for j in all_jobs}.values():
+                cache.set_source_sha(rel, src_sha)
+
+        all_results.extend(new_results)
+        elapsed = time.monotonic() - start_time
+
+        # --- Apply ignore_patterns to survivors ---
+        if cfg.ignore_patterns:
+            ignored_count = 0
+            for r in all_results:
+                if r.status == "survived":
+                    line = get_source_line(sources.get(r.mutation.file, ""), r.mutation.lineno)
+                    if is_line_ignored(line, cfg.ignore_patterns):
+                        # Replace status (MutationResult is frozen, create new)
+                        idx = all_results.index(r)
+                        all_results[idx] = MutationResult(
+                            mutation=r.mutation, status="ignored",
+                            duration_s=r.duration_s, output=r.output, diff=r.diff,
+                        )
+                        ignored_count += 1
+            if ignored_count:
+                typer.echo(f"\n  \033[2mIgnored: {ignored_count} survivor(s) matched ignore_patterns\033[0m")
+
+        # --- Summary ---
+        summary = Summary.from_results(all_results)
+        summary.duration_s = elapsed
+        print_summary(summary)
+
+        if cfg.json_report:
+            write_json_report(summary, Path(cfg.json_report))
+        if cfg.html_report:
+            write_html_report(summary, Path(cfg.html_report))
+        if cfg.junit_report:
+            write_junit_report(summary, Path(cfg.junit_report))
+        if cache:
+            cache.close()
+
+        raise typer.Exit(0 if summary.survived == 0 else 1)
+    finally:
+        shutil.rmtree(root / ".crispr", ignore_errors=True)
 
 
 # ══════════════════════════════════════════════════════════════
