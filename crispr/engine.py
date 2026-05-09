@@ -190,7 +190,11 @@ def generate_mutations(
             if isinstance(pragma, frozenset) and op.name in pragma:
                 continue
             # Bitwise on PEP 604 unions / generic type expressions = noise.
-            if in_annotation and op.name == "bitwise":
+            # Constants in annotations are usually pure type info (`-> None`,
+            # `Literal[42]`, etc.) — mutating them produces type-incoherent
+            # code or no-ops at runtime, never test signal. Same for the
+            # enriched string mutator on string-keyed type expressions.
+            if in_annotation and op.name in ("bitwise", "constant", "string_mutation"):
                 continue
 
             for mutated_node in op.mutate(node):
