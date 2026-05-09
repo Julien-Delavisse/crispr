@@ -513,19 +513,30 @@ def run(
                 bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
             )
 
-            counts = {"killed": 0, "survived": 0, "error": 0}
-            _G, _R, _M, _X = "\033[32m", "\033[31m", "\033[35m", "\033[0m"
+            counts = {"killed": 0, "survived": 0, "error": 0, "ignored": 0}
+            _G, _R, _M, _D, _X = "\033[32m", "\033[31m", "\033[35m", "\033[2m", "\033[0m"
 
             def _on_progress(cur: int, tot: int, r: MutationResult) -> None:
-                # Timeouts are folded into errors at every reporting layer.
+                # Timeouts fold into errors. Mutations whose source line
+                # matches ``ignore_patterns`` fold into ``ignored`` so the
+                # progress bar agrees with the post-hoc summary instead of
+                # showing N survivors that mysteriously become N-K at the end.
                 bucket = "error" if r.status == "timeout" else r.status
+                if bucket in ("survived", "error") and cfg.ignore_patterns:
+                    candidates = get_mutation_lines(
+                        sources.get(r.mutation.file, ""), r.mutation
+                    )
+                    if any(is_line_ignored(c, cfg.ignore_patterns) for c in candidates):
+                        bucket = "ignored"
                 counts[bucket] = counts.get(bucket, 0) + 1
-                bar.set_postfix_str(
-                    f"{_G}killed={counts['killed']}{_X} "
-                    f"{_R}survived={counts['survived']}{_X} "
-                    f"{_M}error={counts['error']}{_X}",
-                    refresh=False,
-                )
+                parts = [f"{_G}killed={counts['killed']}{_X}"]
+                if counts["survived"]:
+                    parts.append(f"{_R}survived={counts['survived']}{_X}")
+                if counts["error"]:
+                    parts.append(f"{_M}error={counts['error']}{_X}")
+                if counts["ignored"]:
+                    parts.append(f"{_D}ignored={counts['ignored']}{_X}")
+                bar.set_postfix_str(" ".join(parts), refresh=False)
                 bar.update(1)
 
             if cfg.workers > 1:
