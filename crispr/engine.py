@@ -152,7 +152,10 @@ def generate_mutations(
         Per-line skip rules from ``# pragma: no mutate`` comments.
         ``None`` value → skip all operators; ``frozenset`` → skip those operators.
     """
-    ops = operators or ALL_OPERATORS
+    # ``operators=[]`` means "no operators" (e.g. from a rule with
+    # ``allowed_operators = []``). Only fall back to the full registry when
+    # the caller passed ``None`` (no filter at all).
+    ops = ALL_OPERATORS if operators is None else operators
     skip = skip_lines or set()
     pragmas = pragma_skips or {}
 
