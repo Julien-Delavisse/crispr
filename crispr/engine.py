@@ -170,6 +170,7 @@ def generate_mutations(
     for node, _parent, _fname, _fidx in _walk_with_parent(tree):
         lineno = getattr(node, "lineno", 0)
         col = getattr(node, "col_offset", 0)
+        end_lineno = getattr(node, "end_lineno", lineno) or lineno
 
         if lineno in skip:
             continue
@@ -178,16 +179,27 @@ def generate_mutations(
         if covered_lines is not None and lineno not in covered_lines:
             continue
 
-        # Check pragma: None = skip all, frozenset = skip selective
-        pragma = pragmas.get(lineno)
-        if pragma is None and lineno in pragmas:
-            continue  # skip all operators on this line
+        # Collect pragmas across every line the node spans — users put
+        # ``# pragma: no mutate`` on the most readable line (top, bottom,
+        # closing ``"""``), not necessarily on ``node.lineno``. ``None``
+        # in pragmas means "skip all"; a frozenset means selective.
+        skip_all_pragma = False
+        selective_pragma: set[str] = set()
+        for ln in range(lineno, end_lineno + 1):
+            if ln in pragmas:
+                p = pragmas[ln]
+                if p is None:
+                    skip_all_pragma = True
+                    break
+                selective_pragma.update(p)
+        if skip_all_pragma:
+            continue
 
         in_annotation = id(node) in annotation_ids
 
         for op in ops:
             # Selective pragma: skip this operator if it's in the exclusion set
-            if isinstance(pragma, frozenset) and op.name in pragma:
+            if op.name in selective_pragma:
                 continue
             # Bitwise on PEP 604 unions / generic type expressions = noise.
             # Constants in annotations are usually pure type info (`-> None`,
