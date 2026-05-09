@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crispr"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast AST-based mutation testing for Python"
 readme = "README.md"
 license = "MIT"
