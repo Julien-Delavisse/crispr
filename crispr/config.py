@@ -31,11 +31,15 @@ Example ``pyproject.toml``::
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pathspec
+
+if TYPE_CHECKING:
+    from .operators import Mutation
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -272,3 +276,46 @@ def get_source_line(source: str, lineno: int) -> str:
     if 1 <= lineno <= len(lines):
         return lines[lineno - 1]
     return ""
+
+
+def get_mutation_lines(source: str, mutation: Mutation) -> list[str]:
+    """Return source lines relevant to *mutation* for ``ignore_patterns``.
+
+    Most operators emit ``mutation.lineno`` at the line where the change
+    happens, so a single line is enough. ``decorator_removal`` is the
+    odd one out: in Python 3.8+ ``FunctionDef.lineno`` / ``ClassDef.lineno``
+    points to the ``def`` / ``class`` line, **after** decorators — so a
+    pattern like ``@property`` or ``@dataclass\\(frozen`` would never match.
+    For that operator we resolve the actual decorator that was removed
+    and return its source span instead.
+    """
+    lines = source.splitlines()
+
+    def at(n: int) -> str:
+        return lines[n - 1] if 1 <= n <= len(lines) else ""
+
+    if mutation.operator == "decorator_removal":
+        orig = mutation.original_node
+        mut = mutation.mutated_node
+        orig_list = getattr(orig, "decorator_list", None)
+        mut_list = getattr(mut, "decorator_list", None)
+        if orig_list is not None and mut_list is not None:
+            try:
+                mut_dumps = [ast.dump(d) for d in mut_list]
+            except Exception:
+                mut_dumps = []
+            for dec in orig_list:
+                try:
+                    dec_dump = ast.dump(dec)
+                except Exception:
+                    continue
+                # The first decorator in orig that's no longer in mut is
+                # the one being removed (decorators preserve order).
+                if dec_dump in mut_dumps:
+                    mut_dumps.remove(dec_dump)
+                    continue
+                start = getattr(dec, "lineno", mutation.lineno)
+                end = getattr(dec, "end_lineno", start) or start
+                return [at(n) for n in range(start, end + 1)]
+
+    return [at(mutation.lineno)]

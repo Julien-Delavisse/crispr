@@ -22,6 +22,7 @@ from .cache import (
 )
 from .config import (
     CrisprConfig,
+    get_mutation_lines,
     get_source_line,
     is_line_ignored,
     load_config,
@@ -582,8 +583,10 @@ def run(
             ignored_count = 0
             for r in all_results:
                 if r.status in ("survived", "error", "timeout"):
-                    line = get_source_line(sources.get(r.mutation.file, ""), r.mutation.lineno)
-                    if is_line_ignored(line, cfg.ignore_patterns):
+                    candidates = get_mutation_lines(
+                        sources.get(r.mutation.file, ""), r.mutation
+                    )
+                    if any(is_line_ignored(c, cfg.ignore_patterns) for c in candidates):
                         # Replace status (MutationResult is frozen, create new)
                         idx = all_results.index(r)
                         all_results[idx] = MutationResult(
