@@ -75,7 +75,10 @@ class Summary:
             elif r.status == "survived":
                 s.survived += 1
             elif r.status == "timeout":
-                s.timeout += 1
+                # Timeouts roll into the error count: they signal a broken
+                # test run (or a mutation that put the suite in an infinite
+                # loop), not a discrete category worth its own column.
+                s.error += 1
             elif r.status == "cached":
                 s.cached += 1
                 s.killed += 1
@@ -128,7 +131,6 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
     print(
         f"  {_C.GREEN}Killed: {summary.killed}{_C.RESET}  │  "
         f"{_C.RED}Survived: {summary.survived}{_C.RESET}  │  "
-        f"{_C.YELLOW}Timeout: {summary.timeout}{_C.RESET}  │  "
         f"{_C.MAGENTA}Error: {summary.error}{_C.RESET}"
     )
     if summary.cached > 0:
@@ -182,8 +184,6 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
             parts = [f"{_C.GREEN}killed={fsum.killed}{_C.RESET}"]
             if fsum.survived:
                 parts.append(f"{_C.RED}survived={fsum.survived}{_C.RESET}")
-            if fsum.timeout:
-                parts.append(f"{_C.YELLOW}timeout={fsum.timeout}{_C.RESET}")
             if fsum.error:
                 parts.append(f"{_C.MAGENTA}error={fsum.error}{_C.RESET}")
             if fsum.ignored:

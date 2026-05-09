@@ -508,15 +508,16 @@ def run(
                 bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
             )
 
-            counts = {"killed": 0, "survived": 0, "timeout": 0, "error": 0}
-            _G, _R, _Y, _M, _X = "\033[32m", "\033[31m", "\033[33m", "\033[35m", "\033[0m"
+            counts = {"killed": 0, "survived": 0, "error": 0}
+            _G, _R, _M, _X = "\033[32m", "\033[31m", "\033[35m", "\033[0m"
 
             def _on_progress(cur: int, tot: int, r: MutationResult) -> None:
-                counts[r.status] = counts.get(r.status, 0) + 1
+                # Timeouts are folded into errors at every reporting layer.
+                bucket = "error" if r.status == "timeout" else r.status
+                counts[bucket] = counts.get(bucket, 0) + 1
                 bar.set_postfix_str(
                     f"{_G}killed={counts['killed']}{_X} "
                     f"{_R}survived={counts['survived']}{_X} "
-                    f"{_Y}timeout={counts['timeout']}{_X} "
                     f"{_M}error={counts['error']}{_X}",
                     refresh=False,
                 )
