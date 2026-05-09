@@ -86,16 +86,31 @@ def _exec_mutation(
     mutation_index: int,
     test_command: list[str],
     timeout: float,
+    operator_names: list[str] | None = None,
+    skip_lines: set[int] | None = None,
+    pragma_skips: dict | None = None,
 ) -> dict:
     """Execute one mutation in a worker directory.
 
     Called in a subprocess (parallel) or directly (sequential).
     Returns a plain dict (picklable across process boundaries).
+
+    The worker must regenerate the mutation list using the *same* filters
+    the CLI applied (per-file operator allow-list, coverage skip lines,
+    pragma skips) — otherwise ``mutation_index`` lands on a different
+    mutation and we report mismatched metadata vs. the change actually run.
     """
     from .engine import generate_mutations, apply_mutation
     from .diff import mutation_diff
+    from .operators import get_operators
 
-    mutations = generate_mutations(source, filepath)
+    ops = get_operators(operator_names) if operator_names is not None else None
+    mutations = generate_mutations(
+        source, filepath,
+        operators=ops,
+        skip_lines=skip_lines,
+        pragma_skips=pragma_skips,
+    )
     if mutation_index >= len(mutations):
         return {
             "index": mutation_index,
@@ -179,13 +194,19 @@ def run_mutations_sequential(
     test_commands: list[list[str]],
     progress_callback: Callable[[int, int, MutationResult], None] | None = None,
     worker_dir: Path | None = None,
+    operator_names: list[str] | None = None,
+    skip_lines: set[int] | None = None,
+    pragma_skips: dict | None = None,
 ) -> list[MutationResult]:
     """Run mutations one at a time in a worker directory."""
     results: list[MutationResult] = []
     work_dir = str(worker_dir) if worker_dir else str(config.project_root)
 
     for seq, (mutation, idx, cmd) in enumerate(zip(mutations, mutation_indices, test_commands)):
-        result_dict = _exec_mutation(work_dir, filepath, source, idx, cmd, config.timeout)
+        result_dict = _exec_mutation(
+            work_dir, filepath, source, idx, cmd, config.timeout,
+            operator_names, skip_lines, pragma_skips,
+        )
         r = MutationResult(
             mutation=mutation,
             status=result_dict["status"],
@@ -212,6 +233,9 @@ class _MutationJob:
     filepath: str
     source: str
     test_command: list[str]
+    operator_names: list[str] | None = None
+    skip_lines: set[int] | None = None
+    pragma_skips: dict | None = None
 
 
 def run_mutations_parallel(
@@ -239,6 +263,9 @@ def run_mutations_parallel(
                 job.mutation_index,
                 job.test_command,
                 config.timeout,
+                job.operator_names,
+                job.skip_lines,
+                job.pragma_skips,
             )
             future_to_idx[future] = i
 

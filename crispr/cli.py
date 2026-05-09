@@ -303,7 +303,15 @@ def run(
             typer.echo(" OK\n")
 
         # --- Generate mutations ---
-        FileEntry = tuple[str, str, list[Mutation], str]
+        # FileEntry carries everything needed to *re-derive the same mutation
+        # list* inside a worker process. The worker uses mutation_index to
+        # pick a mutation out of a regenerated list, so the filters used here
+        # MUST match the filters the worker will use — otherwise indices land
+        # on the wrong mutation.
+        FileEntry = tuple[
+            str, str, list[Mutation], str,
+            list[str], set[int], dict[int, frozenset[str] | None],
+        ]
         file_entries: list[FileEntry] = []
         sources: dict[str, str] = {}  # rel → source (for ignore_patterns)
 
@@ -323,27 +331,32 @@ def run(
                     continue
 
             if cfg.rules:
-                file_operators = get_operators(operators_for_file(rel, all_op_names, cfg.rules))
+                file_op_names = operators_for_file(rel, all_op_names, cfg.rules)
+                file_operators = get_operators(file_op_names)
             else:
                 file_operators = global_operators
+                file_op_names = [op.name for op in global_operators]
 
             mutations = generate_mutations(
                 source, rel, operators=file_operators,
                 skip_lines=skip_lines, pragma_skips=pragma_skips,
             )
             if mutations:
-                file_entries.append((rel, source, mutations, src_sha))
+                file_entries.append(
+                    (rel, source, mutations, src_sha,
+                     file_op_names, skip_lines, pragma_skips)
+                )
 
         total_mutations = sum(len(e[2]) for e in file_entries)
         typer.echo(f"  Generated {total_mutations} mutation(s)\n")
 
         if cfg.debug:
-            for rel, _, mutations, _ in file_entries:
+            for rel, _, mutations, *_ in file_entries:
                 tags = "/".join(f"{m.operator}@{m.lineno}" for m in mutations)
                 typer.echo(f"  {rel} : {tags}")
             typer.echo()
             op_counts: dict[str, int] = {}
-            for _, _, mutations, _ in file_entries:
+            for _, _, mutations, *_ in file_entries:
                 for m in mutations:
                     op_counts[m.operator] = op_counts.get(m.operator, 0) + 1
             if op_counts:
@@ -354,7 +367,7 @@ def run(
                     typer.echo(f"    {op:<{width}}  {n:>5}  {pct:>5.1f}%")
                 typer.echo()
 
-            actual_lines = sum(len({m.lineno for m in muts}) for _, _, muts, _ in file_entries)
+            actual_lines = sum(len({m.lineno for m in muts}) for _, _, muts, *_ in file_entries)
             actual_files = len(file_entries)
             total_files = len(files)
             covered_lines = sum(len(v) for v in cov_data.covered_lines.values()) if cov_data else None
@@ -401,7 +414,7 @@ def run(
             raise typer.Exit(0)
 
         if cfg.dry_run:
-            for rel, _, mutations, _ in file_entries:
+            for rel, _, mutations, *_ in file_entries:
                 for m in mutations:
                     mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
                     typer.echo(f"  {mid}  {m}")
@@ -409,9 +422,16 @@ def run(
             raise typer.Exit(0)
 
         # --- Build jobs ---
-        all_jobs: list[tuple[str, str, str, Mutation, int, list[str]]] = []
+        # Each job carries the same per-file filters used to generate the
+        # mutation list, so the worker regenerates an identical list and
+        # mutation_index resolves to the same Mutation.
+        JobTuple = tuple[
+            str, str, str, Mutation, int, list[str],
+            list[str], set[int], dict[int, frozenset[str] | None],
+        ]
+        all_jobs: list[JobTuple] = []
         targeted_count = 0
-        for rel, source, mutations, src_sha in file_entries:
+        for rel, source, mutations, src_sha, op_names, skip_ln, prag in file_entries:
             for idx, m in enumerate(mutations):
                 mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
                 if cache and cache.is_fresh(mid, src_sha, tests_sha):
@@ -422,12 +442,12 @@ def run(
                     if tests:
                         cmd = build_targeted_command(test_cmd, tests)
                         targeted_count += 1
-                all_jobs.append((rel, source, src_sha, m, idx, cmd))
+                all_jobs.append((rel, source, src_sha, m, idx, cmd, op_names, skip_ln, prag))
 
         # --- Cached results ---
         all_results: list[MutationResult] = []
         cached_count = 0
-        for rel, source, mutations, src_sha in file_entries:
+        for rel, source, mutations, src_sha, *_ in file_entries:
             for m in mutations:
                 mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
                 if cache and cache.is_fresh(mid, src_sha, tests_sha):
@@ -461,9 +481,13 @@ def run(
             typer.echo(" OK\n")
 
             jobs = [
-                _MutationJob(mutation=m, mutation_index=idx, filepath=rel,
-                             source=source, test_command=cmd)
-                for rel, source, _, m, idx, cmd in all_jobs
+                _MutationJob(
+                    mutation=m, mutation_index=idx, filepath=rel,
+                    source=source, test_command=cmd,
+                    operator_names=op_names, skip_lines=skip_ln,
+                    pragma_skips=prag,
+                )
+                for rel, source, _, m, idx, cmd, op_names, skip_ln, prag in all_jobs
             ]
 
             bar = tqdm(
@@ -489,16 +513,23 @@ def run(
             if cfg.workers > 1:
                 new_results = run_mutations_parallel(run_cfg, jobs, worker_dirs, _on_progress)
             else:
+                # Per-file filters (operator allow-list, coverage skip lines,
+                # pragma skips) — same value across every job for a given file.
+                file_filters: dict[str, tuple[list[str], set[int], dict]] = {}
                 by_file: dict[str, list[tuple[Mutation, int, list[str]]]] = {}
-                for rel, source, _, m, idx, cmd in all_jobs:
+                for rel, source, _, m, idx, cmd, op_names, skip_ln, prag in all_jobs:
                     by_file.setdefault(rel, []).append((m, idx, cmd))
+                    file_filters.setdefault(rel, (op_names, skip_ln, prag))
 
                 for rel_key, entries in by_file.items():
-                    src = next(s for r, s, _, _, _, _ in all_jobs if r == rel_key)
+                    src = next(s for r, s, *_ in all_jobs if r == rel_key)
+                    op_names, skip_ln, prag = file_filters[rel_key]
                     new_results.extend(run_mutations_sequential(
                         run_cfg, rel_key, src,
                         [e[0] for e in entries], [e[1] for e in entries], [e[2] for e in entries],
                         progress_callback=_on_progress, worker_dir=worker_dirs[0],
+                        operator_names=op_names, skip_lines=skip_ln,
+                        pragma_skips=prag,
                     ))
 
             bar.close()
@@ -508,7 +539,8 @@ def run(
 
         # --- Store in cache ---
         if cache and new_results:
-            for (rel, _, src_sha, m, _, _), r in zip(all_jobs, new_results):
+            for job_tuple, r in zip(all_jobs, new_results):
+                rel, _, src_sha, m, *_ = job_tuple
                 mid = mutation_id(rel, m.operator, m.lineno, m.col_offset, m.description)
                 cache.store_result(
                     mid=mid, filepath=rel, lineno=m.lineno, col_offset=m.col_offset,
@@ -516,7 +548,8 @@ def run(
                     status=r.status, duration_s=r.duration_s, output=r.output,
                     source_sha=src_sha, tests_sha=tests_sha,
                 )
-            for rel, _, src_sha, _, _, _ in {j[0]: j for j in all_jobs}.values():
+            for job_tuple in {j[0]: j for j in all_jobs}.values():
+                rel, _, src_sha, *_ = job_tuple
                 cache.set_source_sha(rel, src_sha)
 
         all_results.extend(new_results)

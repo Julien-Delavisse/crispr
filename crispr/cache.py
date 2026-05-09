@@ -62,13 +62,27 @@ def hash_tests(test_files: Sequence[Path]) -> str:
     return h.hexdigest()
 
 
+# Mirrors the exclusion logic used by engine.discover_files so that the
+# tests_sha hash stays stable even when site-packages, build artifacts, or
+# worker scratch dirs are present at the project root.
+_SKIP_DIRS = frozenset({
+    "__pycache__", ".git", ".tox", ".venv", "venv", "env",
+    "node_modules", ".mypy_cache", ".pytest_cache", ".eggs",
+    "build", "dist", ".crispr",
+})
+
+
 def discover_test_files(root: Path) -> list[Path]:
     files: list[Path] = []
     for py in sorted(root.rglob("*.py")):
+        if any(part in _SKIP_DIRS for part in py.parts):
+            continue
+        rel_dirs = py.relative_to(root).parts[:-1]
+        if any(p.startswith(".") for p in rel_dirs):
+            continue
         name = py.name
         if name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py":
-            if "__pycache__" not in py.parts:
-                files.append(py)
+            files.append(py)
     return files
 
 
