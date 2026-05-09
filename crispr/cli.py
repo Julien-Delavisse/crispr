@@ -572,11 +572,16 @@ def run(
         all_results.extend(new_results)
         elapsed = time.monotonic() - start_time
 
-        # --- Apply ignore_patterns to survivors ---
+        # --- Apply ignore_patterns ---
+        # The patterns are intent-level ("don't surface verdicts on this
+        # line"), so they apply to errors and timeouts too — not just
+        # survivors. A mutation that produces noise on `__all__ = …` is
+        # equally noisy whether it survived, hit a pytest collection crash,
+        # or timed out at import.
         if cfg.ignore_patterns:
             ignored_count = 0
             for r in all_results:
-                if r.status == "survived":
+                if r.status in ("survived", "error", "timeout"):
                     line = get_source_line(sources.get(r.mutation.file, ""), r.mutation.lineno)
                     if is_line_ignored(line, cfg.ignore_patterns):
                         # Replace status (MutationResult is frozen, create new)
@@ -587,7 +592,7 @@ def run(
                         )
                         ignored_count += 1
             if ignored_count:
-                typer.echo(f"\n  \033[2mIgnored: {ignored_count} survivor(s) matched ignore_patterns\033[0m")
+                typer.echo(f"\n  \033[2mIgnored: {ignored_count} mutation(s) matched ignore_patterns\033[0m")
 
         # --- Summary ---
         summary = Summary.from_results(all_results)
