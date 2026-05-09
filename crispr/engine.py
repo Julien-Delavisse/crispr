@@ -63,6 +63,61 @@ def _is_dunder(node: ast.AST) -> bool:
     return False
 
 
+def _expand_pragmas_to_statements(
+    tree: ast.AST,
+    pragmas: dict[int, frozenset[str] | None],
+) -> dict[int, frozenset[str] | None]:
+    """Propagate each pragma to every line of its smallest enclosing statement.
+
+    A user writing ``# pragma: no mutate`` at the closing line of a
+    multi-line statement (closing paren of a call, closing triple-quote of
+    a docstring, etc.) intends the pragma to cover the whole statement —
+    not just that one line. Without this expansion, mutations on inner
+    nodes (like a string literal on a different line of the same
+    statement) escape the skip because their own ``lineno``/``end_lineno``
+    span doesn't include the pragma's line.
+    """
+    if not pragmas:
+        return pragmas
+
+    statements: list[tuple[int, int]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt):
+            s = getattr(node, "lineno", None)
+            e = getattr(node, "end_lineno", None)
+            if s is not None and e is not None:
+                statements.append((s, e))
+
+    expanded = dict(pragmas)
+    for prag_line, value in list(pragmas.items()):
+        smallest: tuple[int, int] | None = None
+        smallest_size: int | None = None
+        for s, e in statements:
+            if s <= prag_line <= e:
+                size = e - s
+                if smallest_size is None or size < smallest_size:
+                    smallest = (s, e)
+                    smallest_size = size
+        if smallest is None:
+            continue
+        s, e = smallest
+        for ln in range(s, e + 1):
+            existing = expanded.get(ln, "missing")
+            if value is None:
+                # Skip-all wins regardless of what was there.
+                expanded[ln] = None
+            else:
+                if existing == "missing":
+                    expanded[ln] = value
+                elif existing is None:
+                    pass  # already skip-all, don't downgrade
+                else:
+                    # Both selective frozensets: union.
+                    expanded[ln] = existing | value
+
+    return expanded
+
+
 def _annotation_node_ids(tree: ast.AST) -> set[int]:
     """Return id(node) for every AST node located inside a type annotation.
 
@@ -164,6 +219,7 @@ def generate_mutations(
     except SyntaxError:
         return []
 
+    pragmas = _expand_pragmas_to_statements(tree, pragmas)
     annotation_ids = _annotation_node_ids(tree)
     mutations: list[Mutation] = []
 
