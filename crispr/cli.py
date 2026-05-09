@@ -465,7 +465,11 @@ def run(
                 if cache and cache.is_fresh(mid, src_sha, tests_sha):
                     cr = cache.get_result(mid)
                     if cr and cr.status:
-                        diff_text = mutation_diff(source, rel, m) if cr.status == "survived" else ""
+                        diff_text = (
+                            mutation_diff(source, rel, m)
+                            if cr.status in ("survived", "error", "timeout")
+                            else ""
+                        )
                         all_results.append(MutationResult(
                             mutation=m, status=cr.status,
                             duration_s=cr.duration_s, output=cr.output, diff=diff_text,

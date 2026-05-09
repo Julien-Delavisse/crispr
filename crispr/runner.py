@@ -149,6 +149,9 @@ def _exec_mutation(
         elapsed = time.monotonic() - start
 
         status = "killed" if proc.returncode != 0 else "survived"
+        # Keep a diff for everything we plan to display in the summary
+        # (survivors + errors + timeouts) so the reporter can show what
+        # the mutation actually changed without re-parsing the source.
         diff_text = ""
         if status == "survived":
             diff_text = mutation_diff(source, filepath, mutation)
@@ -162,20 +165,28 @@ def _exec_mutation(
         }
 
     except subprocess.TimeoutExpired:
+        try:
+            diff_text = mutation_diff(source, filepath, mutation)
+        except Exception:
+            diff_text = ""
         return {
             "index": mutation_index,
             "status": "timeout",
             "duration_s": timeout,
             "output": "Test suite timed out",
-            "diff": "",
+            "diff": diff_text,
         }
     except Exception as exc:
+        try:
+            diff_text = mutation_diff(source, filepath, mutation)
+        except Exception:
+            diff_text = ""
         return {
             "index": mutation_index,
             "status": "error",
             "duration_s": 0.0,
             "output": str(exc),
-            "diff": "",
+            "diff": diff_text,
         }
     finally:
         target_path.write_text(backup, encoding="utf-8")

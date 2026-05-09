@@ -143,6 +143,25 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
         )
     print(f"  Duration: {summary.duration_s:.1f}s\n")
 
+    def _print_diff_block(r: MutationResult, dot_color: str) -> None:
+        short_id = r.mutation.id[:8] if r.mutation.id else "?"
+        print(
+            f"    {dot_color}●{_C.RESET} {_C.DIM}{short_id}{_C.RESET}  "
+            f"{r.mutation.file}:{r.mutation.lineno}  "
+            f"[{r.mutation.operator}] {r.mutation.description}"
+        )
+        if show_diff and r.diff:
+            for line in r.diff.splitlines():
+                if line.startswith("+") and not line.startswith("+++"):
+                    print(f"      {_C.GREEN}{line}{_C.RESET}")
+                elif line.startswith("-") and not line.startswith("---"):
+                    print(f"      {_C.RED}{line}{_C.RESET}")
+                elif line.startswith("@@"):
+                    print(f"      {_C.CYAN}{line}{_C.RESET}")
+                else:
+                    print(f"      {_C.DIM}{line}{_C.RESET}")
+            print()
+
     # Survivors detail with diffs
     survivors = [
         r for r in _all_results(summary) if r.status == "survived"
@@ -150,23 +169,17 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
     if survivors:
         print(f"  {_C.RED}{_C.BOLD}Surviving mutations ({len(survivors)}):{_C.RESET}\n")
         for r in survivors:
-            short_id = r.mutation.id[:8] if r.mutation.id else "?"
-            print(
-                f"    {_C.RED}●{_C.RESET} {_C.DIM}{short_id}{_C.RESET}  "
-                f"{r.mutation.file}:{r.mutation.lineno}  "
-                f"[{r.mutation.operator}] {r.mutation.description}"
-            )
-            if show_diff and r.diff:
-                for line in r.diff.splitlines():
-                    if line.startswith("+") and not line.startswith("+++"):
-                        print(f"      {_C.GREEN}{line}{_C.RESET}")
-                    elif line.startswith("-") and not line.startswith("---"):
-                        print(f"      {_C.RED}{line}{_C.RESET}")
-                    elif line.startswith("@@"):
-                        print(f"      {_C.CYAN}{line}{_C.RESET}")
-                    else:
-                        print(f"      {_C.DIM}{line}{_C.RESET}")
-                print()
+            _print_diff_block(r, _C.RED)
+        print()
+
+    # Erroring mutations detail (errors + folded-in timeouts)
+    errors = [
+        r for r in _all_results(summary) if r.status in ("error", "timeout")
+    ]
+    if errors:
+        print(f"  {_C.MAGENTA}{_C.BOLD}Erroring mutations ({len(errors)}):{_C.RESET}\n")
+        for r in errors:
+            _print_diff_block(r, _C.MAGENTA)
         print()
 
     # Per-file breakdown
