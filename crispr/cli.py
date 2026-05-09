@@ -72,10 +72,93 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+_OPERATOR_CATEGORIES: list[tuple[str, list[tuple[str, str]]]] = [
+    ("Arithmetic", [
+        ("arithmetic",          "a + b → a - b"),
+        ("bitwise",             "a & b → a | b"),
+        ("aug_assign",          "x += 1 → x -= 1"),
+        ("range_boundary",      "range(10) → range(11)"),
+    ]),
+    ("Logic", [
+        ("comparison",          "x == y → x != y"),
+        ("comparison_boundary", "x < y → x <= y"),
+        ("boolean",             "a and b → a or b"),
+        ("negate_condition",    "if x: → if not x:"),
+        ("unary",               "-x → +x, not x → x"),
+    ]),
+    ("Values", [
+        ("constant",            "42 → 43, True → False"),
+        ("string_mutation",     "\"foo\" → \"XXfooXX\" / lower / upper"),
+        ("fstring",             "f\"x={x}\" → f\"{x}\""),
+        ("default_param",       "def f(x=10) → def f(x=None)"),
+    ]),
+    ("Control", [
+        ("return",              "return x → return None"),
+        ("yield",               "yield x → yield None"),
+        ("if_else_swap",        "swaps the bodies of if/else"),
+        ("ternary_swap",        "a if c else b → b if c else a"),
+        ("break_continue",      "break ↔ continue"),
+        ("remove_await",        "await f() → f()"),
+    ]),
+    ("Statements", [
+        ("stmt_deletion",       "any statement → pass"),
+        ("assign_to_none",      "x = expr → x = None"),
+        ("assert_removal",      "assert cond → pass"),
+        ("decorator_removal",   "@cache\\ndef f(): ... → def f(): ..."),
+    ]),
+    ("Calls", [
+        ("call_arg",            "drop / swap arguments"),
+        ("keyword_name",        "f(timeout=…) → f(retries=…)"),
+        ("string_method_swap",  "\"x\".upper() → \"x\".lower()"),
+        ("dict_method_swap",    "d.get(k) → d.pop(k)"),
+        ("subscript",           "xs[0] → xs[1]"),
+    ]),
+    ("Errors", [
+        ("exception_handler",   "except E: … → except E: pass"),
+        ("exception_widen",     "except ValueError → except Exception"),
+    ]),
+    ("Misc", [
+        ("comp_filter",         "[x for x in xs if cond] drops the if"),
+    ]),
+]
+
+
+def _operators_list_callback(value: bool) -> None:
+    if not value:
+        return
+    registered = {op.name for op in ALL_OPERATORS}
+    documented: set[str] = set()
+    name_w = max(len(name) for _, items in _OPERATOR_CATEGORIES for name, _ in items)
+    _BOLD, _DIM, _RST = "\033[1m", "\033[2m", "\033[0m"
+
+    typer.echo(f"\n  {_BOLD}Available mutation operators ({len(registered)}){_RST}\n")
+    for category, items in _OPERATOR_CATEGORIES:
+        typer.echo(f"  {_BOLD}{category}{_RST}")
+        for name, example in items:
+            documented.add(name)
+            typer.echo(f"      {name:<{name_w}}  {_DIM}{example}{_RST}")
+        typer.echo()
+
+    missing = sorted(registered - documented)
+    if missing:
+        typer.echo(f"  {_BOLD}Other{_RST}")
+        for name in missing:
+            typer.echo(f"      {name}")
+        typer.echo()
+
+    typer.echo(f"  {_DIM}Use -o/--operators NAME ... to restrict a run to a subset.{_RST}\n")
+    raise typer.Exit()
+
+
 @app.callback(invoke_without_command=True)
 def _main(
     ctx: typer.Context,
     version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True),
+    operators_list: bool = typer.Option(
+        False, "--operators-list",
+        callback=_operators_list_callback, is_eager=True,
+        help="List available mutation operators and exit.",
+    ),
 ) -> None:
     """Fast AST-based mutation testing for Python."""
     if ctx.invoked_subcommand is None:
