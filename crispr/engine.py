@@ -63,6 +63,41 @@ def _is_dunder(node: ast.AST) -> bool:
     return False
 
 
+def _annotation_node_ids(tree: ast.AST) -> set[int]:
+    """Return id(node) for every AST node located inside a type annotation.
+
+    Covers ``AnnAssign.annotation``, ``arg.annotation``, and
+    ``FunctionDef.returns``/``AsyncFunctionDef.returns``. A ``BinOp`` matched
+    here is almost always a PEP 604 union (``int | str``); mutating it via
+    the ``bitwise`` operator just produces import-time errors and zero signal.
+    """
+    inside: set[int] = set()
+
+    def is_annotation_field(parent: ast.AST, fname: str) -> bool:
+        if isinstance(parent, ast.AnnAssign) and fname == "annotation":
+            return True
+        if isinstance(parent, ast.arg) and fname == "annotation":
+            return True
+        if isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and fname == "returns":
+            return True
+        return False
+
+    def visit(node: ast.AST, in_ann: bool) -> None:
+        if in_ann:
+            inside.add(id(node))
+        for fname, value in ast.iter_fields(node):
+            child_in_ann = in_ann or is_annotation_field(node, fname)
+            if isinstance(value, list):
+                for item in value:
+                    if isinstance(item, ast.AST):
+                        visit(item, child_in_ann)
+            elif isinstance(value, ast.AST):
+                visit(value, child_in_ann)
+
+    visit(tree, False)
+    return inside
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -126,6 +161,7 @@ def generate_mutations(
     except SyntaxError:
         return []
 
+    annotation_ids = _annotation_node_ids(tree)
     mutations: list[Mutation] = []
 
     for node, _parent, _fname, _fidx in _walk_with_parent(tree):
@@ -144,9 +180,14 @@ def generate_mutations(
         if pragma is None and lineno in pragmas:
             continue  # skip all operators on this line
 
+        in_annotation = id(node) in annotation_ids
+
         for op in ops:
             # Selective pragma: skip this operator if it's in the exclusion set
             if isinstance(pragma, frozenset) and op.name in pragma:
+                continue
+            # Bitwise on PEP 604 unions / generic type expressions = noise.
+            if in_annotation and op.name == "bitwise":
                 continue
 
             for mutated_node in op.mutate(node):
