@@ -605,8 +605,6 @@ def run(
                             duration_s=r.duration_s, output=r.output, diff=r.diff,
                         )
                         ignored_count += 1
-            if ignored_count:
-                typer.echo(f"\n  \033[2mIgnored: {ignored_count} mutation(s) matched ignore_patterns\033[0m")
 
         # --- Summary ---
         summary = Summary.from_results(all_results)

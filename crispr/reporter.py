@@ -128,15 +128,16 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
 
     print(f"  Mutation score: {score_color}{_C.BOLD}{score:.1f}%{_C.RESET}")
     print(f"  Total mutations: {summary.total}")
-    print(
+    stats = (
         f"  {_C.GREEN}Killed: {summary.killed}{_C.RESET}  │  "
         f"{_C.RED}Survived: {summary.survived}{_C.RESET}  │  "
         f"{_C.MAGENTA}Error: {summary.error}{_C.RESET}"
     )
+    if summary.ignored > 0:
+        stats += f"  │  {_C.DIM}Ignored: {summary.ignored}{_C.RESET}"
+    print(stats)
     if summary.cached > 0:
         print(f"  {_C.CYAN}Cache hits: {summary.cached}{_C.RESET} (skipped re-testing)")
-    if summary.ignored > 0:
-        print(f"  {_C.DIM}Ignored: {summary.ignored} (matched ignore_patterns){_C.RESET}")
     if summary.skipped_no_coverage > 0:
         print(
             f"  {_C.DIM}Skipped (no coverage): {summary.skipped_no_coverage}{_C.RESET}"
