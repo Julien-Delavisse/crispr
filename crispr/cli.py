@@ -271,6 +271,48 @@ def run(
                     typer.echo(f"    {op:<{width}}  {n:>5}  {pct:>5.1f}%")
                 typer.echo()
 
+            actual_lines = sum(len({m.lineno for m in muts}) for _, _, muts, _ in file_entries)
+            actual_files = len(file_entries)
+            total_files = len(files)
+            covered_lines = sum(len(v) for v in cov_data.covered_lines.values()) if cov_data else None
+            covered_files = len(cov_data.covered_lines) if cov_data else None
+            potential_lines = actual_lines
+            potential_files = actual_files
+            if cfg.rules:
+                potential_lines = 0
+                potential_files = 0
+                for fpath in files:
+                    rel = str(fpath.relative_to(root))
+                    src = sources.get(rel)
+                    if src is None:
+                        continue
+                    pskips = parse_pragma_skips(src)
+                    sk: set[int] = set()
+                    if cfg.coverage and cov_data:
+                        if rel not in cov_data.covered_lines:
+                            continue
+                        all_ln = set(range(1, src.count("\n") + 2))
+                        sk = all_ln - cov_data.covered_lines[rel]
+                    pmuts = generate_mutations(
+                        src, rel, operators=global_operators,
+                        skip_lines=sk, pragma_skips=pskips,
+                    )
+                    if pmuts:
+                        potential_files += 1
+                        potential_lines += len({m.lineno for m in pmuts})
+            typer.echo(f"  Source files:                  {total_files}")
+            if covered_files is not None:
+                typer.echo(f"  Covered files (baseline):      {covered_files}")
+            if cfg.rules:
+                typer.echo(f"  Mutable files (without rules): {potential_files}")
+            typer.echo(f"  Mutable files (after rules):   {actual_files}")
+            if covered_lines is not None:
+                typer.echo(f"  Covered lines (baseline):      {covered_lines}")
+            if cfg.rules:
+                typer.echo(f"  Mutable lines (without rules): {potential_lines}")
+            typer.echo(f"  Mutable lines (after rules):   {actual_lines}")
+            typer.echo()
+
         if total_mutations == 0:
             typer.echo("  Nothing to mutate.")
             raise typer.Exit(0)
