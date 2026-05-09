@@ -179,10 +179,9 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
                 fc = _C.YELLOW
             else:
                 fc = _C.RED
-            parts = [
-                f"{_C.GREEN}killed={fsum.killed}{_C.RESET}",
-                f"{_C.RED}survived={fsum.survived}{_C.RESET}",
-            ]
+            parts = [f"{_C.GREEN}killed={fsum.killed}{_C.RESET}"]
+            if fsum.survived:
+                parts.append(f"{_C.RED}survived={fsum.survived}{_C.RESET}")
             if fsum.timeout:
                 parts.append(f"{_C.YELLOW}timeout={fsum.timeout}{_C.RESET}")
             if fsum.error:
