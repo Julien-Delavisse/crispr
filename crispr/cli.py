@@ -259,6 +259,17 @@ def run(
                 tags = "/".join(f"{m.operator}@{m.lineno}" for m in mutations)
                 typer.echo(f"  {rel} : {tags}")
             typer.echo()
+            op_counts: dict[str, int] = {}
+            for _, _, mutations, _ in file_entries:
+                for m in mutations:
+                    op_counts[m.operator] = op_counts.get(m.operator, 0) + 1
+            if op_counts:
+                typer.echo(f"  Mutants by operator ({total_mutations} total):")
+                width = max(len(op) for op in op_counts)
+                for op, n in sorted(op_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                    pct = n * 100 / total_mutations
+                    typer.echo(f"    {op:<{width}}  {n:>5}  {pct:>5.1f}%")
+                typer.echo()
 
         if total_mutations == 0:
             typer.echo("  Nothing to mutate.")
@@ -333,7 +344,7 @@ def run(
             bar = tqdm(
                 total=len(jobs), desc="  Mutating",
                 unit="mut", leave=True, disable=cfg.quiet,
-                bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]",
+                bar_format="  {l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
             )
 
             counts = {"killed": 0, "survived": 0, "timeout": 0, "error": 0}
