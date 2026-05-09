@@ -89,11 +89,22 @@ def operators_for_file(
     all_operator_names: list[str],
     rules: list[OperatorRule],
 ) -> list[str]:
-    """Apply rules top-to-bottom; **last** matching rule wins."""
-    result = all_operator_names
+    """Apply rules top-to-bottom; rules **compose**.
+
+    Each matching rule filters the *previous* result (not the global set),
+    so layered rules narrow the operator set rather than resetting it.
+    Concretely: a broad ``allowed_operators`` rule defines the base set,
+    and later ``excluded_operators`` rules subtract from it.
+
+    Edge case worth knowing: under composition, an ``allowed_operators``
+    rule applied after another ``allowed_operators`` rule yields the
+    intersection of both — list members not present in the earlier set
+    are silently dropped.
+    """
+    result = list(all_operator_names)
     for rule in rules:
         if rule.matches(filepath):
-            result = rule.filter_operators(all_operator_names)
+            result = rule.filter_operators(result)
     return result
 
 
