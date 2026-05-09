@@ -195,6 +195,40 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
             )
         print()
 
+    # Per-operator breakdown
+    results_by_op: dict[str, list[MutationResult]] = {}
+    for r in _all_results(summary):
+        results_by_op.setdefault(r.mutation.operator, []).append(r)
+
+    if len(results_by_op) > 1:
+        print(f"  {_C.BOLD}Per-operator breakdown:{_C.RESET}\n")
+        width = max(len(op) for op in results_by_op)
+        # Sort by total descending, then alphabetically — biggest contributors first.
+        for op, op_results in sorted(
+            results_by_op.items(), key=lambda kv: (-len(kv[1]), kv[0])
+        ):
+            osum = Summary.from_results(op_results)
+            sc = osum.score
+            if sc >= 80:
+                fc = _C.GREEN
+            elif sc >= 60:
+                fc = _C.YELLOW
+            else:
+                fc = _C.RED
+            parts = [f"{_C.GREEN}killed={osum.killed}{_C.RESET}"]
+            if osum.survived:
+                parts.append(f"{_C.RED}survived={osum.survived}{_C.RESET}")
+            if osum.error:
+                parts.append(f"{_C.MAGENTA}error={osum.error}{_C.RESET}")
+            if osum.ignored:
+                parts.append(f"{_C.DIM}ignored={osum.ignored}{_C.RESET}")
+            parts.append(f"total={osum.total}")
+            print(
+                f"    {op:<{width}}  {fc}{sc:5.1f}%{_C.RESET}  "
+                + "  ".join(parts)
+            )
+        print()
+
     print(f"{_C.BOLD}{bar}{_C.RESET}")
 
 
