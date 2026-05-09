@@ -179,9 +179,20 @@ def print_summary(summary: Summary, show_diff: bool = True) -> None:
                 fc = _C.YELLOW
             else:
                 fc = _C.RED
+            parts = [
+                f"{_C.GREEN}killed={fsum.killed}{_C.RESET}",
+                f"{_C.RED}survived={fsum.survived}{_C.RESET}",
+            ]
+            if fsum.timeout:
+                parts.append(f"{_C.YELLOW}timeout={fsum.timeout}{_C.RESET}")
+            if fsum.error:
+                parts.append(f"{_C.MAGENTA}error={fsum.error}{_C.RESET}")
+            if fsum.ignored:
+                parts.append(f"{_C.DIM}ignored={fsum.ignored}{_C.RESET}")
+            parts.append(f"total={fsum.total}")
             print(
                 f"    {fpath:<45} {fc}{sc:5.1f}%{_C.RESET}  "
-                f"({fsum.killed}k / {fsum.survived}s / {fsum.total}t)"
+                + "  ".join(parts)
             )
         print()
 
