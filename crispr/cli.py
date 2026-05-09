@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import shutil
 import sys
 import time
@@ -136,6 +137,7 @@ def run(
     html: Optional[str] = typer.Option(None, "--html", help="HTML report path"),
     junit: Optional[str] = typer.Option(None, "--junit", help="JUnit XML report path"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Summary only"),
+    debug: bool = typer.Option(False, "--debug", help="List mutations per file before running"),
     dry_run: bool = typer.Option(False, "--dry-run", help="List mutations only"),
 ) -> None:
     """Run mutation testing."""
@@ -144,7 +146,8 @@ def run(
         path, config, command=command, workers=workers, include=include,
         exclude=exclude, operators=operators, timeout=timeout,
         no_baseline=no_baseline, no_cache=no_cache, coverage=coverage,
-        source_dirs=source_dirs, json=json, html=html, junit=junit, quiet=quiet, dry_run=dry_run,
+        source_dirs=source_dirs, json=json, html=html, junit=junit,
+        quiet=quiet, debug=debug, dry_run=dry_run,
     )
 
     test_cmd = cfg.command.split()
@@ -176,15 +179,37 @@ def run(
     # --- Baseline ---
     cov_data: CoverageData | None = None
     if cfg.coverage:
-        typer.echo("  Running baseline with coverage (dynamic contexts)...", nl=False)
-        cov_data = run_coverage_baseline(root, test_cmd, cfg.timeout, source_dirs=cfg.source_dirs)
-        if not cov_data.passed:
-            typer.echo(f" FAILED\n\n{cov_data.output}")
-            raise typer.Exit(1)
-        total_cov = sum(len(v) for v in cov_data.covered_lines.values())
-        ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
-        ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
-        typer.echo(f" OK ({total_cov} lines covered{ctx_note})\n")
+        cov_key = ""
+        if cache:
+            kh = hashlib.sha256()
+            kh.update(tests_sha.encode())
+            kh.update(hash_tests(files).encode())
+            kh.update(" ".join(test_cmd).encode())
+            kh.update(",".join(sorted(cfg.source_dirs or [])).encode())
+            cov_key = kh.hexdigest()
+            cached = cache.get_coverage_payload(cov_key)
+            if cached is not None:
+                try:
+                    cov_data = CoverageData.from_json(cached)
+                except (KeyError, ValueError):
+                    cov_data = None
+        if cov_data is not None:
+            total_cov = sum(len(v) for v in cov_data.covered_lines.values())
+            ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
+            ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
+            typer.echo(f"  Reusing cached coverage baseline ({total_cov} lines covered{ctx_note})\n")
+        else:
+            typer.echo("  Running baseline with coverage (dynamic contexts)...", nl=False)
+            cov_data = run_coverage_baseline(root, test_cmd, cfg.timeout, source_dirs=cfg.source_dirs)
+            if not cov_data.passed:
+                typer.echo(f" FAILED\n\n{cov_data.output}")
+                raise typer.Exit(1)
+            total_cov = sum(len(v) for v in cov_data.covered_lines.values())
+            ctx_n = sum(len(v) for v in cov_data.line_contexts.values()) if cov_data.has_contexts else 0
+            ctx_note = f", {ctx_n} with test mapping" if ctx_n else ""
+            typer.echo(f" OK ({total_cov} lines covered{ctx_note})\n")
+            if cache and cov_key:
+                cache.set_coverage_payload(cov_key, cov_data.to_json())
     elif not cfg.no_baseline:
         typer.echo("  Running baseline tests...", nl=False)
         passed, output = check_baseline(run_cfg)
@@ -227,6 +252,12 @@ def run(
 
     total_mutations = sum(len(e[2]) for e in file_entries)
     typer.echo(f"  Generated {total_mutations} mutation(s)\n")
+
+    if cfg.debug:
+        for rel, _, mutations, _ in file_entries:
+            tags = "/".join(f"{m.operator}@{m.lineno}" for m in mutations)
+            typer.echo(f"  {rel} : {tags}")
+        typer.echo()
 
     if total_mutations == 0:
         typer.echo("  Nothing to mutate.")

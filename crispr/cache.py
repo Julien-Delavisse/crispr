@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS mutations (
 
 CREATE INDEX IF NOT EXISTS idx_mut_file   ON mutations(filepath);
 CREATE INDEX IF NOT EXISTS idx_mut_status ON mutations(status);
+
+CREATE TABLE IF NOT EXISTS coverage_baseline (
+    key     TEXT PRIMARY KEY,
+    payload TEXT NOT NULL
+);
 """
 
 
@@ -174,6 +179,22 @@ class MutationCache:
             ).fetchall()
         return [CachedResult(*r) for r in rows]
 
+    def get_coverage_payload(self, key: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT payload FROM coverage_baseline WHERE key = ?", (key,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def set_coverage_payload(self, key: str, payload: str) -> None:
+        self._conn.execute(
+            "DELETE FROM coverage_baseline WHERE key != ?", (key,)
+        )
+        self._conn.execute(
+            "INSERT OR REPLACE INTO coverage_baseline (key, payload) VALUES (?, ?)",
+            (key, payload),
+        )
+        self._conn.commit()
+
     def stats(self) -> dict[str, int]:
         rows = self._conn.execute(
             "SELECT status, COUNT(*) FROM mutations GROUP BY status"
@@ -182,5 +203,6 @@ class MutationCache:
 
     def clear(self) -> None:
         self._conn.executescript(
-            "DELETE FROM mutations; DELETE FROM file_hashes; DELETE FROM test_hash;"
+            "DELETE FROM mutations; DELETE FROM file_hashes; "
+            "DELETE FROM test_hash; DELETE FROM coverage_baseline;"
         )

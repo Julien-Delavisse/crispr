@@ -41,6 +41,31 @@ class CoverageData:
             return None
         return file_ctx.get(lineno)
 
+    def to_json(self) -> str:
+        """Serialize to JSON (sets → lists, int keys → strings)."""
+        return json.dumps({
+            "passed": self.passed,
+            "covered_lines": {f: sorted(lines) for f, lines in self.covered_lines.items()},
+            "line_contexts": {
+                f: {str(ln): tests for ln, tests in ctx.items()}
+                for f, ctx in self.line_contexts.items()
+            },
+            "output": self.output,
+        })
+
+    @classmethod
+    def from_json(cls, payload: str) -> "CoverageData":
+        d = json.loads(payload)
+        return cls(
+            passed=d["passed"],
+            covered_lines={f: set(lines) for f, lines in d["covered_lines"].items()},
+            line_contexts={
+                f: {int(ln): tests for ln, tests in ctx.items()}
+                for f, ctx in d["line_contexts"].items()
+            },
+            output=d["output"],
+        )
+
     def tests_for_mutation(self, filepath: str, lineno: int) -> list[str] | None:
         """Return deduplicated test list for a mutation.
 

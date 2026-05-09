@@ -116,6 +116,7 @@ class CrisprConfig:
     no_cache: bool = False
     no_baseline: bool = False
     quiet: bool = False
+    debug: bool = False
     dry_run: bool = False
     json_report: str | None = None
     html_report: str | None = None
@@ -214,6 +215,7 @@ def merge_cli_over_config(
         "no_cache": "no_cache",
         "no_baseline": "no_baseline",
         "quiet": "quiet",
+        "debug": "debug",
         "dry_run": "dry_run",
         "json": "json_report",
         "html": "html_report",
